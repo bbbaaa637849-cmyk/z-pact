@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">منصة Z-PACT</string>
+    <string name="app_subtitle">منصة المذكرات والأختام الذكية</string>
+
+    <!-- التبويبات الرئيسية -->
+    <string name="tab_store">المتجر</string>
+    <string name="tab_admin_hub">الإدارة والمرسلون</string>
+    <string name="tab_orders">الميني آب</string>
+    <string name="tab_radar">رادار الـ SMS</string>
+
+    <!-- رسائل التحميل -->
+    <string name="download_started">جاري تنزيل ملف المذكرة المختوم...</string>
+    <string name="download_completed">اكتمل تنزيل مذكرتك بنجاح في مجلد Downloads!</string>
+</resources>

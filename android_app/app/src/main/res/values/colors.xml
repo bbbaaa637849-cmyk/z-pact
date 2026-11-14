@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- ألوان النيون والأوبسيديان المتناسقة مع منصة Z-PACT -->
+    <color name="bg_obsidian">#07090E</color>
+    <color name="bg_card">#0D111A</color>
+    <color name="bg_surface">#131926</color>
+    <color name="border_glass">#1F293D</color>
+
+    <!-- ألوان النيون الرئيسية -->
+    <color name="neon_cyan">#00F5D4</color>
+    <color name="neon_indigo">#4361EE</color>
+    <color name="neon_magenta">#F72585</color>
+    <color name="neon_purple">#7B2CBF</color>
+
+    <!-- ألوان الحالة والتنبيهات -->
+    <color name="status_green">#10B981</color>
+    <color name="status_yellow">#F59E0B</color>
+    <color name="status_red">#EF4444</color>
+
+    <!-- النصوص والتباين -->
+    <color name="text_primary">#F8FAFC</color>
+    <color name="text_secondary">#94A3B8</color>
+    <color name="text_muted">#64748B</color>
+    <color name="text_dark">#0F172A</color>
+
+    <!-- عناصر النظام -->
+    <color name="nav_active">#00F5D4</color>
+    <color name="nav_inactive">#64748B</color>
+    <color name="nav_background">#0A0D14</color>
+</resources>
+

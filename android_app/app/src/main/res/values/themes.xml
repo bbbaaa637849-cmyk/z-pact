@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.ZPactEnterprise" parent="Theme.Material3.Dark.NoActionBar">
+        <!-- الألوان الأساسية -->
+        <item name="colorPrimary">@color/neon_cyan</item>
+        <item name="colorPrimaryVariant">@color/neon_indigo</item>
+        <item name="colorOnPrimary">@color/text_dark</item>
+
+        <item name="colorSecondary">@color/neon_magenta</item>
+        <item name="colorSecondaryVariant">@color/neon_purple</item>
+        <item name="colorOnSecondary">@color/text_primary</item>
+
+        <!-- الخلفيات والأسطح -->
+        <item name="android:windowBackground">@color/bg_obsidian</item>
+        <item name="colorSurface">@color/bg_card</item>
+        <item name="colorOnSurface">@color/text_primary</item>
+
+        <!-- أشرطة النظام -->
+        <item name="android:statusBarColor">@color/bg_obsidian</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:navigationBarColor">@color/nav_background</item>
+        <item name="android:windowLightNavigationBar">false</item>
+    </style>
+
+    <style name="Theme.ZPactEnterprise.Dialog" parent="Theme.Material3.Dark.Dialog">
+        <item name="android:windowBackground">@drawable/bg_dialog_card</item>
+        <item name="colorSurface">@color/bg_card</item>
+        <item name="colorPrimary">@color/neon_cyan</item>
+    </style>
+</resources>
+

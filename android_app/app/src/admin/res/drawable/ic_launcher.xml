@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- خلفية أوبسيديان ملكية للأدمن والرادار -->
+    <path
+        android:fillColor="#060913"
+        android:pathData="M0,0h108v108h-108z"/>
+    <path
+        android:fillColor="#0F172A"
+        android:pathData="M54,10A44,44 0 1,1 53.9,10Z"/>
+    <path
+        android:strokeColor="#F59E0B"
+        android:strokeWidth="2.5"
+        android:pathData="M54,14A40,40 0 1,1 53.9,14Z"/>
+    <path
+        android:strokeColor="#00F5D4"
+        android:strokeWidth="1.5"
+        android:pathData="M54,24A30,30 0 1,1 53.9,24Z"/>
+    <!-- صاعقة الرادار السيادية -->
+    <path
+        android:fillColor="#00F5D4"
+        android:pathData="M52,80h-4l4,-26H38c-3,0 -1.2,-2.8 0,-4.2L62,24h4l-4,26h14c1.8,0 2.1,1.2 1.7,2L52,80z"/>
+</vector>
+

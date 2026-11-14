@@ -1,0 +1,35 @@
+# ================================================================
+# WebPDF Elite — Z-PACT-main .gitignore (Private Repo Ready)
+# ================================================================
+
+# بيئة العمل الافتراضية والـ Cache
+.venv/
+venv/
+ENV/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# ملفات مؤقتة لقاعدة البيانات (مع الإبقاء على storage/webpdf_elite.db)
+storage/database.sqlite
+*.db-journal
+*.db-wal
+*.db-shm
+
+# مخرجات الختم المؤقتة فقط
+storage/stamped/*
+!storage/stamped/.gitkeep
+storage/previews/*
+!storage/previews/.gitkeep
+
+# سجلات التطبيق والملفات المحلية للمحرر
+app.log
+*.log
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

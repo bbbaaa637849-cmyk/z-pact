@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Z-PACT الإدارة والرادار</string>
+    <string name="app_subtitle">منظومة الإدارة ورادار المدفوعات التلقائي</string>
+    <string name="tab_radar">رادار الـ SMS</string>
+
+    <!-- خدمة رادار الـ SMS -->
+    <string name="radar_service_channel_name">رادار مدفوعات Z-PACT</string>
+    <string name="radar_service_channel_desc">مراقبة رسائل التحويل وتأكيد الطلبات تلقائياً بالخلفية</string>
+    <string name="radar_active_title">🟢 رادار Z-PACT نشط</string>
+    <string name="radar_active_desc">يرصد ويحفظ جميع التحويلات تلقائياً على السيرفر...</string>
+    <string name="radar_stat_format">تم رصد ومزامنة %d تحويل</string>
+
+    <!-- شاشة إعدادات الخادم -->
+    <string name="server_config_title">إعدادات الاتصال بالسيرفر</string>
+    <string name="server_url_hint">رابط الخادم (تلقائي عبر السحابة أو الشبكة)</string>
+    <string name="webhook_secret_hint">مفتاح الويب هوك السري (X-Webhook-Secret)</string>
+    <string name="admin_key_hint">مفتاح الجسر الداخلي (X-Internal-Service-Key)</string>
+    <string name="btn_test_connection">اختبار الاتصال بالسيرفر ⚡</string>
+    <string name="btn_save_config">حفظ الإعدادات</string>
+</resources>

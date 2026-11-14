@@ -1,0 +1,830 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>بوابة Z-PACT المعتمدة — الدخول والتوثيق</title>
+  <link rel="icon" href="/frontend/assets/logo.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&family=Outfit:wght@700;800;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/frontend/css/global.css?v=3.1.0">
+  <style>
+    :root {
+      --bg-deep: #050814;
+      --bg-card: rgba(13, 21, 39, 0.88);
+      --cyan: #38bdf8;
+      --purple: #a855f7;
+      --emerald: #10b981;
+      --gold: #fbbf24;
+      --rose: #fb7185;
+      --border-subtle: rgba(255, 255, 255, 0.09);
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body {
+      margin: 0; padding: 0; min-height: 100%;
+      height: auto !important;
+      background: var(--bg-deep);
+      color: #f8fafc;
+      font-family: 'Cairo', sans-serif;
+      overflow-x: hidden;
+      overflow-y: auto !important;
+      -webkit-overflow-scrolling: touch !important;
+      touch-action: pan-y !important;
+    }
+    .royal-bg {
+      position: fixed; inset: 0; z-index: 0; pointer-events: none;
+      background:
+        radial-gradient(circle at 85% 15%, rgba(56, 189, 248, 0.16), transparent 42%),
+        radial-gradient(circle at 12% 85%, rgba(168, 85, 247, 0.14), transparent 45%),
+        radial-gradient(circle at 50% 50%, rgba(16, 185, 129, 0.08), transparent 55%);
+    }
+    .grid-mesh {
+      position: fixed; inset: 0; z-index: 0; pointer-events: none;
+      background-image:
+        linear-gradient(rgba(56,189,248,0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(56,189,248,0.03) 1px, transparent 1px);
+      background-size: 40px 40px;
+    }
+    .auth-shell {
+      position: relative; z-index: 2;
+      display: flex; min-height: 100vh; width: 100%;
+    }
+    .showcase-pane {
+      flex: 1;
+      display: flex; flex-direction: column; justify-content: center; align-items: center;
+      padding: 3rem;
+      border-left: 1px solid var(--border-subtle);
+      background: linear-gradient(155deg, rgba(13, 22, 44, 0.72), rgba(6, 10, 22, 0.88));
+      text-align: center;
+    }
+    .portal-pane {
+      width: 520px; min-width: 520px;
+      display: flex; flex-direction: column; justify-content: center;
+      padding: 2.2rem 2rem;
+      background: rgba(8, 13, 27, 0.9);
+      backdrop-filter: blur(28px);
+    }
+    @media (max-width: 960px) {
+      .showcase-pane { display: none; }
+      .portal-pane { 
+        width: 100%; min-width: unset; 
+        padding: 1.5rem 1.1rem 5rem;
+        justify-content: flex-start !important;
+        overflow-y: auto !important;
+        -webkit-overflow-scrolling: touch !important;
+      }
+    }
+    .glass-card {
+      background: linear-gradient(155deg, rgba(18, 28, 54, 0.88), rgba(10, 16, 33, 0.95));
+      border: 1px solid rgba(56, 189, 248, 0.28);
+      border-radius: 24px;
+      padding: 24px 20px;
+      box-shadow: 0 24px 60px rgba(0,0,0,0.65), inset 0 1px 0 rgba(255,255,255,0.08);
+    }
+    .main-tabs {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
+      background: rgba(3, 7, 18, 0.75);
+      border: 1px solid var(--border-subtle);
+      border-radius: 16px; padding: 5px; margin-bottom: 18px;
+    }
+    .main-tab {
+      border: none; background: transparent; color: #94a3b8;
+      font-family: inherit; font-size: 13px; font-weight: 800;
+      padding: 10px 8px; border-radius: 12px; cursor: pointer;
+      transition: all 0.2s;
+    }
+    .main-tab.active {
+      background: linear-gradient(135deg, #0ea5e9, #6366f1);
+      color: #fff;
+      box-shadow: 0 6px 18px rgba(14, 165, 233, 0.35);
+    }
+    .sub-tabs {
+      display: flex; gap: 6px; margin-bottom: 16px;
+      border-bottom: 1px solid var(--border-subtle); padding-bottom: 10px;
+    }
+    .sub-tab {
+      background: none; border: none; color: #94a3b8;
+      font-family: inherit; font-size: 12px; font-weight: 800;
+      padding: 6px 10px; border-radius: 10px; cursor: pointer;
+      transition: all 0.2s;
+    }
+    .sub-tab.active {
+      background: rgba(56, 189, 248, 0.15);
+      color: var(--cyan);
+    }
+    .lux-label { display: block; font-size: 12px; font-weight: 800; color: #cbd5e1; margin-bottom: 6px; }
+    .lux-input {
+      width: 100%; padding: 12px 14px;
+      border-radius: 14px;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(4, 9, 20, 0.85);
+      color: #fff; font-family: inherit; font-size: 14px; font-weight: 700;
+      outline: none; transition: all 0.2s;
+    }
+    .lux-input:focus {
+      border-color: var(--cyan);
+      box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.18);
+    }
+    .btn-royal {
+      width: 100%; border: none; cursor: pointer;
+      padding: 13px 18px; border-radius: 15px;
+      background: linear-gradient(135deg, #0ea5e9, #6366f1);
+      color: #fff; font-family: inherit; font-size: 14px; font-weight: 900;
+      box-shadow: 0 10px 25px rgba(14, 165, 233, 0.35);
+      transition: transform 0.2s, opacity 0.2s;
+    }
+    .btn-royal:active { transform: scale(0.98); }
+    .btn-royal:disabled { opacity: 0.55; cursor: not-allowed; }
+    .btn-telegram-otp {
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+      width: 100%; padding: 11px 14px; border-radius: 14px;
+      background: linear-gradient(135deg, #0284c7, #0369a1);
+      color: #fff; font-family: inherit; font-size: 13px; font-weight: 800;
+      text-decoration: none; border: 1px solid rgba(56,189,248,0.4);
+      margin-top: 8px; transition: all 0.2s;
+    }
+    .btn-telegram-otp:active { transform: scale(0.98); }
+    .serial-chip {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: rgba(16, 185, 129, 0.12);
+      border: 1px solid rgba(16, 185, 129, 0.35);
+      color: #34d399; font-family: 'Outfit', monospace;
+      font-size: 11px; font-weight: 800;
+      padding: 4px 12px; border-radius: 999px;
+    }
+    .otp-box {
+      background: rgba(168, 85, 247, 0.08);
+      border: 1px solid rgba(168, 85, 247, 0.35);
+      border-radius: 16px; padding: 14px; margin: 12px 0;
+    }
+    .otp-input-digits {
+      letter-spacing: 8px; font-size: 22px; text-align: center;
+      font-family: 'Outfit', monospace; font-weight: 900; color: #fbbf24;
+    }
+  </style>
+</head>
+<body>
+  <div class="royal-bg"></div>
+  <div class="grid-mesh"></div>
+
+  <div class="auth-shell">
+    <!-- اللوحة التعريفية الفاخرة (سطح المكتب) -->
+    <div class="showcase-pane">
+      <img src="/frontend/assets/logo.png" alt="Z-PACT" style="width:115px; height:auto; filter:drop-shadow(0 0 28px rgba(56,189,248,0.5)); margin-bottom:16px;">
+      <div style="font-family:'Outfit',sans-serif; font-size:44px; font-weight:900; background:linear-gradient(135deg,#38bdf8,#818cf8,#34d399); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent; line-height:1;">Z-PACT v3.1</div>
+      <p style="color:#94a3b8; font-size:14px; max-width:380px; line-height:1.8; margin:12px 0 24px;">
+        منظومة التوثيق السيادية وحماية وتوزيع المذكرات الرقمية للمدرسين المعتمدين وقفل الأجهزة.
+      </p>
+
+      <div style="display:flex; flex-direction:column; gap:10px; width:100%; max-width:360px;">
+        <div style="background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08); border-radius:14px; padding:12px 14px; text-align:right;">
+          <div style="font-weight:800; font-size:13px; color:#38bdf8;">🔐 كلمة سر سيادية فقط للأدمن</div>
+          <div style="font-size:11px; color:#94a3b8;">حصري من تطبيق الإدارة ومحمي بموافقة أول أدمن المؤسس</div>
+        </div>
+        <div style="background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08); border-radius:14px; padding:12px 14px; text-align:right;">
+          <div style="font-weight:800; font-size:13px; color:#34d399;">📲 هاتف + كلمة سر + رمز OTP</div>
+          <div style="font-size:11px; color:#94a3b8;">توثيق سريع للمدرسين والمرسلين عبر SMS وتليجرام الفوري</div>
+        </div>
+        <div style="background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08); border-radius:14px; padding:12px 14px; text-align:right;">
+          <div style="font-weight:800; font-size:13px; color:#fbbf24;">🛡️ سيريال الأجهزة المعتمدة</div>
+          <div style="font-size:11px; color:#94a3b8;">منع الدخول العشوائي وتفعيل فوري بسيريال VIP أو موافقة الإدارة</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- لوحة التوثيق والدخول -->
+    <div class="portal-pane">
+      <div style="text-align:center; margin-bottom:16px;">
+        <div style="font-family:'Outfit',sans-serif; font-size:32px; font-weight:900; background:linear-gradient(135deg,#38bdf8,#a855f7); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;">Z-PACT</div>
+        <div id="portal-subtitle" style="font-size:12px; color:#94a3b8; font-weight:700; margin-top:2px;">بوابة الدخول والتوثيق المعتمدة</div>
+        <div style="margin-top:8px;">
+          <span class="serial-chip" id="device-serial-badge">🛡️ بصمة الجهاز: ...</span>
+        </div>
+      </div>
+
+      <div class="glass-card">
+        <div id="alert-banner" style="display:none; padding:10px 12px; border-radius:12px; font-size:13px; font-weight:700; margin-bottom:14px;"></div>
+
+        <!-- أ. وضع تطبيق الأدمن الحصري (كلمة سر فقط + أول أدمن + طلب أدمن إضافي) -->
+        <div id="section-admin-app-exclusive" style="display:none;">
+          <div style="text-align:center; margin-bottom:14px;">
+            <div style="font-size:42px; margin-bottom:4px;">👑</div>
+            <h2 id="adm-app-title" style="margin:0; font-size:19px; font-weight:900; color:#c084fc;">غرفة القيادة السيادية للأدمن</h2>
+            <p id="adm-app-desc" style="font-size:12px; color:#94a3b8; margin:4px 0 0;">دخول مباشر بكلمة السر السيادية فقط بدون أي إيميل أو هاتف</p>
+          </div>
+
+          <!-- نموذج تعيين أول أدمن (يظهر فقط إذا لم يتم تأسيس أول أدمن بعد) -->
+          <form id="form-founding-setup" style="display:none;" onsubmit="handleFoundingAdminSetup(event)">
+            <div style="background:rgba(168,85,247,0.1); border:1px solid rgba(168,85,247,0.3); border-radius:14px; padding:12px; margin-bottom:14px; font-size:12px; color:#e9d5ff;">
+              ✨ مرحباً بك! هذا الهاتف هو أول جهاز إدارة يتصل بالمنظومة. عيّن كلمة السر السيادية لأول أدمن (المؤسس).
+            </div>
+            <div style="margin-bottom:12px;">
+              <label class="lux-label">👑 اسم الأدمن المؤسس:</label>
+              <input id="founding-name" type="text" class="lux-input" value="الأدمن المؤسس (أول أدمن)" required>
+            </div>
+            <div style="margin-bottom:12px;">
+              <label class="lux-label">🔑 كلمة السر السيادية الجديدة (6 أحرف/أرقام على الأقل):</label>
+              <input id="founding-pass" type="password" class="lux-input" placeholder="••••••••" required>
+            </div>
+            <div style="margin-bottom:16px;">
+              <label class="lux-label">🔑 تأكيد كلمة السر:</label>
+              <input id="founding-pass-confirm" type="password" class="lux-input" placeholder="••••••••" required>
+            </div>
+            <button type="submit" id="btn-founding-submit" class="btn-royal" style="background:linear-gradient(135deg,#a855f7,#7c3aed);">👑 تأسيس الحساب السيادي والدخول فوراً</button>
+          </form>
+
+          <!-- نموذج دخول الأدمن بكلمة السر فقط -->
+          <form id="form-admin-login-only" style="display:none;" onsubmit="handleAdminPasswordOnlyLogin(event)">
+            <div style="margin-bottom:16px;">
+              <label class="lux-label">🔑 أدخل كلمة سر الأدمن:</label>
+              <input id="admin-vault-pass" type="password" class="lux-input" placeholder="••••••••" required autofocus style="text-align:center; font-size:18px;">
+            </div>
+            <button type="submit" id="btn-adm-login" class="btn-royal" style="background:linear-gradient(135deg,#a855f7,#6366f1);">🔓 فتح غرفة القيادة</button>
+
+            <!-- صندوق طلب حساب أدمن إضافي من هذا الهاتف -->
+            <div style="margin-top:16px; border-top:1px solid var(--border-subtle); padding-top:12px;">
+              <button type="button" class="sub-tab" style="width:100%; text-align:center; color:#fbbf24;" onclick="toggleCoAdminRequestBox()">
+                ➕ طلب حساب أدمن إضافي من هذا الهاتف (بموافقة أول أدمن)
+              </button>
+            </div>
+          </form>
+
+          <!-- نموذج طلب حساب أدمن إضافي -->
+          <form id="form-coadmin-request" style="display:none; margin-top:12px; background:rgba(0,0,0,0.3); border:1px solid rgba(251,191,36,0.3); border-radius:14px; padding:12px;" onsubmit="handleRequestCoAdmin(event)">
+            <div style="font-size:12px; font-weight:800; color:#fbbf24; margin-bottom:8px;">طلب حساب أدمن إضافي (يتطلب موافقة أول أدمن):</div>
+            <div style="margin-bottom:10px;">
+              <label class="lux-label">الاسم التوضيحي للمشرف:</label>
+              <input id="coadmin-label" type="text" class="lux-input" placeholder="مثال: أدمن الدعم الفني" required>
+            </div>
+            <div style="margin-bottom:12px;">
+              <label class="lux-label">كلمة السر الخاصة بهذا الحساب:</label>
+              <input id="coadmin-pass" type="password" class="lux-input" placeholder="••••••••" required>
+            </div>
+            <button type="submit" id="btn-coadmin-req" class="btn-royal" style="background:linear-gradient(135deg,#f59e0b,#d97706); font-size:13px; padding:10px;">إرسال طلب الاعتماد لأول أدمن 📡</button>
+          </form>
+
+          <!-- رادار انتظار موافقة أول أدمن على حساب المشرف الإضافي -->
+          <div id="coadmin-pending-radar" style="display:none; text-align:center; padding:14px 6px;">
+            <div style="font-size:44px; margin-bottom:6px;">⏳</div>
+            <h3 style="margin:0 0 6px; font-size:17px; font-weight:900; color:#fbbf24;">وصل طلبك إلى (أول أدمن / المؤسس)!</h3>
+            <p style="font-size:12px; color:#94a3b8; line-height:1.7; margin-bottom:12px;">
+              تم إرسال إشعار فوري بحسابك <strong id="coadmin-radar-name" style="color:#fff;"></strong> إلى أول أدمن على تليجرام ولوحة الإدارة. سيفتح التطبيق تلقائياً فور موافقته.
+            </p>
+            <div style="font-size:12px; color:#38bdf8; font-weight:800;">🛰️ بانتظار إشارة الموافقة السيادية...</div>
+          </div>
+        </div>
+
+        <!-- ب. وضع الويب والتطبيقات العادية (المدرسين + الأدمن بكلمة سر فقط) -->
+        <div id="section-regular-auth">
+          <div class="main-tabs">
+            <button type="button" id="tab-main-teacher" class="main-tab active" onclick="switchMainRole('teacher')">🎓 حسابات المدرسين</button>
+            <button type="button" id="tab-main-admin" class="main-tab" onclick="switchMainRole('admin')">👑 دخول الأدمن</button>
+          </div>
+
+          <!-- 1. واجهة المدرسين (هاتف + كلمة سر + OTP) -->
+          <div id="view-teacher-auth">
+            <div class="sub-tabs">
+              <button type="button" class="sub-tab active" id="subtab-t-login" onclick="switchTeacherTab('login')">تسجيل الدخول</button>
+              <button type="button" class="sub-tab" id="subtab-t-register" onclick="switchTeacherTab('register')">حساب جديد (OTP)</button>
+              <button type="button" class="sub-tab" id="subtab-t-reset" onclick="switchTeacherTab('reset')">نسيت كلمة السر</button>
+            </div>
+
+            <!-- أ. تسجيل دخول المدرس (هاتف + كلمة سر) -->
+            <form id="form-t-login" onsubmit="handleTeacherLogin(event)">
+              <div style="margin-bottom:12px;">
+                <label class="lux-label">📱 رقم موبايل المدرس:</label>
+                <input id="tl-phone" type="tel" class="lux-input" placeholder="010XXXXXXXX" required autocomplete="tel" style="text-align:center; font-size:16px;">
+              </div>
+              <div style="margin-bottom:14px;">
+                <label class="lux-label">🔒 كلمة السر:</label>
+                <input id="tl-pass" type="password" class="lux-input" placeholder="••••••••" required autocomplete="current-password">
+              </div>
+
+              <!-- صندوق إدخال OTP عند تسجيل الدخول من جهاز جديد أو لأول مرة -->
+              <div id="tl-otp-box" class="otp-box" style="display:none;">
+                <div style="font-size:12px; font-weight:800; color:#c084fc; margin-bottom:6px;">🔐 تأكيد الهوية برمز الـ OTP (6 أرقام):</div>
+                <input id="tl-otp-code" type="text" maxlength="6" class="lux-input otp-input-digits" placeholder="------">
+                <a id="tl-tg-link" href="#" target="_blank" class="btn-telegram-otp" style="display:none;">📲 استلام الرمز فوراً عبر تليجرام ⚡</a>
+              </div>
+
+              <button type="submit" id="btn-tl-submit" class="btn-royal">🚀 تسجيل الدخول</button>
+            </form>
+
+            <!-- ب. حساب مدرس جديد (هاتف + كلمة سر + OTP + سيريال VIP اختياري) -->
+            <form id="form-t-register" style="display:none;" onsubmit="handleTeacherRegister(event)">
+              <div style="margin-bottom:10px;">
+                <label class="lux-label">📱 رقم موبايل المدرس:</label>
+                <input id="tr-phone" type="tel" class="lux-input" placeholder="010XXXXXXXX" required autocomplete="tel" style="text-align:center;">
+                <div style="display:flex; justify-content:flex-end;">
+                  <button type="button" id="btn-tr-edit-phone" onclick="enablePhoneEdit()" style="display:none; font-size:11px; background:none; border:none; color:#38bdf8; cursor:pointer; padding:3px 0; font-weight:700;">✏️ تغيير الرقم / طلب كود جديد</button>
+                </div>
+              </div>
+              <div style="margin-bottom:10px;">
+                <label class="lux-label">👨‍🏫 الاسم الأكاديمي الثلاثي:</label>
+                <input id="tr-name" type="text" class="lux-input" placeholder="مثال: أ/ محمد عبد الرحمن" required>
+              </div>
+              <div style="margin-bottom:10px;">
+                <label class="lux-label">🔒 كلمة السر للحساب (6 أحرف/أرقام كحد أدنى):</label>
+                <input id="tr-pass" type="password" class="lux-input" placeholder="••••••••" required>
+              </div>
+              <div style="margin-bottom:12px;">
+                <label class="lux-label">🔑 كود سيريال تفعيل فوري (VIP Serial - اختياري):</label>
+                <input id="tr-serial" type="text" class="lux-input" placeholder="ZP-VIP-XXXX-XXXX" style="text-transform:uppercase; font-family:monospace;">
+              </div>
+
+              <!-- صندوق كود الـ OTP المطور -->
+              <div id="tr-otp-box" class="otp-box" style="display:none;">
+                <div id="tr-inline-alert" style="display:none; padding:8px 12px; border-radius:10px; font-size:12px; margin-bottom:10px; line-height:1.5;"></div>
+                <div style="font-size:13px; font-weight:800; color:#34d399; margin-bottom:6px;">📲 أدخل كود التحقق (OTP) المكون من 6 أرقام:</div>
+                <input id="tr-otp-code" type="text" maxlength="6" class="lux-input otp-input-digits" placeholder="------" autocomplete="one-time-code">
+                <a id="tr-tg-link" href="#" target="_blank" class="btn-telegram-otp" style="display:none;">📲 استلام الرمز فوراً عبر تليجرام ⚡</a>
+                <div style="font-size:11px; color:#94a3b8; margin-top:8px; line-height:1.5;">
+                  💡 <b>أمان مشدد:</b> سيتم التحقق من مطابقة رقم هاتفك المكتوب بالأعلى مع حساب التليجرام الخاص بك لضمان هويتك ومنع انتحال شخصيتك.
+                </div>
+              </div>
+
+              <div id="tr-reg-error-msg" style="display:none; color:#f87171; font-size:12px; margin-bottom:10px; font-weight:700;"></div>
+
+              <button type="button" id="btn-tr-req-otp" class="btn-royal" style="margin-bottom:8px;" onclick="requestRegisterOtp()">📲 إرسال رمز التحقق OTP</button>
+              <button type="submit" id="btn-tr-submit" class="btn-royal" style="display:none; background:linear-gradient(135deg,#10b981,#059669);">✅ تأكيد الرمز وإنشاء الحساب</button>
+            </form>
+
+            <!-- ج. استعادة كلمة السر عبر OTP -->
+            <form id="form-t-reset" style="display:none;" onsubmit="handleTeacherResetPass(event)">
+              <div style="margin-bottom:12px;">
+                <label class="lux-label">📱 رقم هاتفك المسجل:</label>
+                <input id="treset-phone" type="tel" class="lux-input" placeholder="010XXXXXXXX" required style="text-align:center;">
+              </div>
+              <div id="treset-otp-box" class="otp-box" style="display:none;">
+                <div style="font-size:12px; font-weight:800; color:#38bdf8; margin-bottom:6px;">📲 رمز التحقق (OTP):</div>
+                <input id="treset-otp-code" type="text" maxlength="6" class="lux-input otp-input-digits" placeholder="------">
+                <a id="treset-tg-link" href="#" target="_blank" class="btn-telegram-otp" style="display:none;">📲 استلام الرمز عبر تليجرام ⚡</a>
+                <div style="margin-top:10px;">
+                  <label class="lux-label">🔒 كلمة السر الجديدة:</label>
+                  <input id="treset-newpass" type="password" class="lux-input" placeholder="••••••••">
+                </div>
+              </div>
+              <button type="button" id="btn-treset-req" class="btn-royal" onclick="requestResetOtp()">📲 إرسال كود استعادة كلمة السر</button>
+              <button type="submit" id="btn-treset-submit" class="btn-royal" style="display:none; background:linear-gradient(135deg,#10b981,#0ea5e9);">🔐 حفظ كلمة السر والدخول</button>
+            </form>
+
+            <!-- شاشة رادار الانتظار لتفعيل الأدمن لحساب المدرس -->
+            <div id="t-pending-radar" style="display:none; text-align:center; padding:12px 6px;">
+              <div style="font-size:44px; margin-bottom:6px;">🛰️</div>
+              <h3 style="margin:0 0 6px; font-size:18px; font-weight:900; color:#34d399;">تم توثيق رقمك وبانتظار موافقة الإدارة!</h3>
+              <p style="font-size:12px; color:#94a3b8; line-height:1.75; margin-bottom:12px;">
+                مرحباً بك يا <strong id="t-pend-name" style="color:#fff;"></strong>! وصل طلبك لتطبيق الإدارة، وسيفتح المتجر تلقائياً فور ضغط الإدارة على تفعيل.
+              </p>
+              <div style="margin-bottom:12px;">
+                <span class="serial-chip" id="t-pend-serial">ZP-TCH-XXXX</span>
+              </div>
+              <div style="font-size:12px; color:#38bdf8; font-weight:800;">⏳ متصل بالرادار في انتظار إشارة التفعيل...</div>
+            </div>
+          </div>
+
+          <!-- 2. واجهة دخول الأدمن بالويب (كلمة سر فقط — بدون إيميل!) -->
+          <div id="view-admin-auth" style="display:none;">
+            <div style="text-align:center; margin-bottom:14px;">
+              <div style="font-size:36px; margin-bottom:4px;">🔑</div>
+              <h3 style="margin:0; font-size:17px; font-weight:900; color:#c084fc;">دخول الإدارة (كلمة السر فقط)</h3>
+              <p style="font-size:12px; color:#94a3b8; margin:2px 0 0;">خاص بمشرفي المنظومة المعتمدين</p>
+            </div>
+            <form onsubmit="handleWebAdminLogin(event)">
+              <div style="margin-bottom:14px;">
+                <label class="lux-label">🔑 أدخل كلمة سر الأدمن:</label>
+                <input id="web-admin-pass" type="password" class="lux-input" placeholder="••••••••" required autofocus style="text-align:center; font-size:18px;">
+              </div>
+              <button type="submit" id="btn-web-adm-submit" class="btn-royal" style="background:linear-gradient(135deg,#a855f7,#6366f1);">🔐 دخول لوحة الإدارة</button>
+            </form>
+            <div style="background:rgba(168,85,247,0.06); border:1px solid rgba(168,85,247,0.22); border-radius:12px; padding:10px 12px; margin-top:14px; font-size:11px; color:#cbd5e1; line-height:1.6;">
+              📌 <b>تنبيه أمني:</b> تهيئة أول أدمن (المؤسس) أو إنشاء وتفعيل مشرفين جدد متاح حصرياً ومحمي من داخل تطبيق الإدارة الرسمي (<code>Z-PACT-Admin-Radar.apk</code>) فقط.
+            </div>
+          </div>
+        </div>
+
+        <div style="margin-top:16px; padding-top:12px; border-top:1px solid var(--border-subtle); display:flex; justify-content:space-between; align-items:center; font-size:12px; color:#94a3b8;">
+          <span>عضو في فريق الإرسال؟</span>
+          <a href="/sender" style="color:#34d399; font-weight:800; text-decoration:none;">🚀 بوابة المرسلين ←</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/frontend/js/api.js?v=3.1.0"></script>
+  <script>
+    if (isLoggedIn()) {
+      window.location.href = isAdmin() ? "/admin" : "/store";
+    }
+
+    const deviceId = window.getDeviceID();
+    document.getElementById("device-serial-badge").textContent = "🛡️ بصمة الجهاز: " + deviceId;
+
+    let currentChallengeToken = "";
+    let teacherRadarInterval = null;
+    let coAdminRadarInterval = null;
+
+    function showBanner(msg, type = "error") {
+      const el = document.getElementById("alert-banner");
+      const styles = {
+        error: "background:rgba(244,63,94,0.16);border:1px solid rgba(244,63,94,0.4);color:#fda4af;",
+        success: "background:rgba(16,185,129,0.16);border:1px solid rgba(16,185,129,0.4);color:#6ee7b7;",
+        info: "background:rgba(56,189,248,0.16);border:1px solid rgba(56,189,248,0.4);color:#7dd3fc;",
+      };
+      el.setAttribute("style", `display:block;padding:10px 12px;border-radius:12px;font-size:13px;font-weight:700;margin-bottom:14px;${styles[type] || styles.error}`);
+      el.textContent = msg;
+    }
+    function hideBanner() { document.getElementById("alert-banner").style.display = "none"; }
+
+    function openTelegramSafe(url) {
+      if (!url) return;
+      try {
+        if (window.ZPactNativeBridge && typeof window.ZPactNativeBridge.openExternalUrl === "function") {
+          window.ZPactNativeBridge.openExternalUrl(url);
+          return;
+        }
+      } catch (_) {}
+      try {
+        window.location.href = url;
+      } catch (_) {
+        window.open(url, "_blank");
+      }
+    }
+
+    // ── فحص نمط التطبيق ──
+    const isAdminApp = (window.ZPactNativeBridge && typeof window.ZPactNativeBridge.isAdminFlavor === "function" && window.ZPactNativeBridge.isAdminFlavor()) ||
+      window.location.search.includes("mode=admin_vault") ||
+      deviceId.toUpperCase().startsWith("ZP-ADM-");
+
+    async function initAuthScreen() {
+      if (isAdminApp) {
+        document.getElementById("section-regular-auth").style.display = "none";
+        document.getElementById("section-admin-app-exclusive").style.display = "block";
+        document.getElementById("portal-subtitle").textContent = "👑 بوابة القيادة السيادية للأدمن";
+
+        try {
+          const st = await window.v3API.adminVaultStatus();
+          if (!st.has_founding_admin) {
+            document.getElementById("form-founding-setup").style.display = "block";
+            document.getElementById("adm-app-title").textContent = "👑 تأسيس أول أدمن (المؤسس)";
+            document.getElementById("adm-app-desc").textContent = "قم بتعيين كلمة السر السيادية لأول أدمن من هذا الجهاز";
+          } else if (st.pending_co_admin) {
+            showCoAdminRadar(st.pending_co_admin.admin_label, st.pending_co_admin.user_id);
+          } else {
+            document.getElementById("form-admin-login-only").style.display = "block";
+          }
+        } catch (err) {
+          document.getElementById("form-admin-login-only").style.display = "block";
+        }
+      }
+    }
+    initAuthScreen();
+
+    // ── دوال تطبيق الأدمن السيادي ──
+    window.handleFoundingAdminSetup = async (e) => {
+      e.preventDefault();
+      hideBanner();
+      const p1 = document.getElementById("founding-pass").value;
+      const p2 = document.getElementById("founding-pass-confirm").value;
+      const name = document.getElementById("founding-name").value.trim() || "الأدمن المؤسس (أول أدمن)";
+      if (p1 !== p2) { showBanner("كلمتا السر غير متطابقتين"); return; }
+      if (p1.length < 6) { showBanner("يجب ألا تقل كلمة السر عن 6 أحرف أو أرقام"); return; }
+
+      const btn = document.getElementById("btn-founding-submit");
+      btn.disabled = true;
+      try {
+        const res = await window.v3API.adminSetupFounding({ password: p1, admin_label: name });
+        showBanner("✅ تم تعيين كلمة السر السيادية لأول أدمن بنجاح!", "success");
+        setTimeout(() => { window.location.href = "/admin"; }, 800);
+      } catch (err) {
+        showBanner(err.message);
+        btn.disabled = false;
+      }
+    };
+
+    window.handleAdminPasswordOnlyLogin = async (e) => {
+      e.preventDefault();
+      hideBanner();
+      const pass = document.getElementById("admin-vault-pass").value;
+      const btn = document.getElementById("btn-adm-login");
+      btn.disabled = true;
+      try {
+        const res = await window.v3API.adminVaultLogin(pass);
+        window.location.href = "/admin";
+      } catch (err) {
+        showBanner(err.message);
+        btn.disabled = false;
+      }
+    };
+
+    window.toggleCoAdminRequestBox = () => {
+      const box = document.getElementById("form-coadmin-request");
+      box.style.display = box.style.display === "none" ? "block" : "none";
+    };
+
+    window.handleRequestCoAdmin = async (e) => {
+      e.preventDefault();
+      hideBanner();
+      const label = document.getElementById("coadmin-label").value.trim();
+      const pass = document.getElementById("coadmin-pass").value;
+      const btn = document.getElementById("btn-coadmin-req");
+      btn.disabled = true;
+      try {
+        const res = await window.v3API.requestCoAdmin({ admin_label: label, password: pass });
+        showCoAdminRadar(label, res.user_id);
+      } catch (err) {
+        showBanner(err.message);
+        btn.disabled = false;
+      }
+    };
+
+    function showCoAdminRadar(label, userId) {
+      document.getElementById("form-admin-login-only").style.display = "none";
+      document.getElementById("form-coadmin-request").style.display = "none";
+      document.getElementById("coadmin-pending-radar").style.display = "block";
+      document.getElementById("coadmin-radar-name").textContent = label;
+
+      if (coAdminRadarInterval) clearInterval(coAdminRadarInterval);
+      coAdminRadarInterval = setInterval(async () => {
+        try {
+          const res = await window.v3API.pollCoAdmin(userId);
+          if (res.status === "approved" && res.access_token) {
+            clearInterval(coAdminRadarInterval);
+            localStorage.setItem("access_token", res.access_token);
+            localStorage.setItem("current_user", JSON.stringify(res.user));
+            window.location.href = "/admin";
+          } else if (res.status === "rejected") {
+            clearInterval(coAdminRadarInterval);
+            showBanner("⛔ تم رفض طلب الاعتماد من قبل أول أدمن.");
+          }
+        } catch (_) {}
+      }, 3000);
+    }
+
+    // ── دوال الويب والمدرسين ──
+    window.switchMainRole = (role) => {
+      hideBanner();
+      document.getElementById("tab-main-teacher").classList.toggle("active", role === "teacher");
+      document.getElementById("tab-main-admin").classList.toggle("active", role === "admin");
+      document.getElementById("view-teacher-auth").style.display = role === "teacher" ? "block" : "none";
+      document.getElementById("view-admin-auth").style.display = role === "admin" ? "block" : "none";
+    };
+
+    window.switchTeacherTab = (tab) => {
+      hideBanner();
+      document.getElementById("subtab-t-login").classList.toggle("active", tab === "login");
+      document.getElementById("subtab-t-register").classList.toggle("active", tab === "register");
+      document.getElementById("subtab-t-reset").classList.toggle("active", tab === "reset");
+      document.getElementById("form-t-login").style.display = tab === "login" ? "block" : "none";
+      document.getElementById("form-t-register").style.display = tab === "register" ? "block" : "none";
+      document.getElementById("form-t-reset").style.display = tab === "reset" ? "block" : "none";
+      document.getElementById("t-pending-radar").style.display = "none";
+    };
+
+    window.handleTeacherLogin = async (e) => {
+      e.preventDefault();
+      hideBanner();
+      const phone = document.getElementById("tl-phone").value.trim();
+      const pass = document.getElementById("tl-pass").value;
+      const otpCode = document.getElementById("tl-otp-code").value.trim();
+      const btn = document.getElementById("btn-tl-submit");
+
+      btn.disabled = true;
+      try {
+        const payload = { phone, password: pass };
+        if (currentChallengeToken && otpCode) {
+          payload.challenge_token = currentChallengeToken;
+          payload.otp_code = otpCode;
+        }
+        const res = await window.v3API.teacherLogin(payload);
+        if (res.status === "approved" && res.access_token) {
+          window.location.href = "/store";
+          return;
+        }
+        if (res.status === "require_otp" || res.status === "need_password_setup") {
+          currentChallengeToken = res.challenge_token || "";
+          document.getElementById("tl-otp-box").style.display = "block";
+          if (res.telegram_otp_url) {
+            const tg = document.getElementById("tl-tg-link");
+            tg.style.display = "inline-flex";
+            tg.onclick = (ev) => { ev.preventDefault(); openTelegramSafe(res.telegram_otp_url); };
+          }
+          showBanner(res.message, "info");
+          btn.textContent = "✅ تأكيد رمز الـ OTP والدخول";
+          return;
+        }
+        if (res.status === "pending_approval") {
+          showTeacherRadar(res.full_name || phone, res.serial_code || "", phone);
+        }
+      } catch (err) {
+        showBanner(err.message);
+      } finally {
+        btn.disabled = false;
+      }
+    };
+
+    function showInlineRegisterAlert(msg, type = "info") {
+      const el = document.getElementById("tr-inline-alert");
+      if (!el) return;
+      const styles = {
+        error: "background:rgba(244,63,94,0.16);border:1px solid rgba(244,63,94,0.4);color:#fda4af;",
+        info: "background:rgba(56,189,248,0.16);border:1px solid rgba(56,189,248,0.4);color:#7dd3fc;",
+        success: "background:rgba(16,185,129,0.16);border:1px solid rgba(16,185,129,0.4);color:#6ee7b7;"
+      };
+      el.setAttribute("style", `display:block;padding:8px 12px;border-radius:10px;font-size:12px;margin-bottom:10px;line-height:1.5;${styles[type] || styles.info}`);
+      el.textContent = msg;
+    }
+
+    window.requestRegisterOtp = async () => {
+      hideBanner();
+      const phoneInput = document.getElementById("tr-phone");
+      const phone = phoneInput.value.trim();
+      if (!phone || phone.length < 11) {
+        showInlineRegisterAlert("⚠️ أدخل رقم هاتف مصري صحيح مكون من 11 رقماً", "error");
+        return;
+      }
+
+      const btn = document.getElementById("btn-tr-req-otp");
+      const origText = btn.innerHTML;
+      btn.disabled = true;
+      btn.innerHTML = '⏳ جاري طلب رمز التحقق (OTP)...';
+
+      try {
+        const res = await window.v3API.requestOtp({ phone, target_role: "teacher", purpose: "register" });
+        currentChallengeToken = res.challenge_token;
+
+        // تثبيت الرقم وإظهار إمكانية التعديل
+        phoneInput.readOnly = true;
+        phoneInput.style.background = "rgba(16, 185, 129, 0.08)";
+        phoneInput.style.borderColor = "rgba(16, 185, 129, 0.4)";
+        const editBtn = document.getElementById("btn-tr-edit-phone");
+        if (editBtn) editBtn.style.display = "block";
+
+        const otpBox = document.getElementById("tr-otp-box");
+        otpBox.style.display = "block";
+        document.getElementById("btn-tr-submit").style.display = "block";
+        btn.style.display = "none";
+
+        if (res.telegram_otp_url) {
+          const tg = document.getElementById("tr-tg-link");
+          tg.style.display = "inline-flex";
+          tg.href = res.telegram_otp_url;
+          tg.onclick = (ev) => {
+            ev.preventDefault();
+            openTelegramSafe(res.telegram_otp_url);
+          };
+        }
+
+        showInlineRegisterAlert(res.message, "info");
+        otpBox.scrollIntoView({ behavior: "smooth", block: "center" });
+        setTimeout(() => {
+          const otpInput = document.getElementById("tr-otp-code");
+          if (otpInput) otpInput.focus();
+        }, 300);
+
+      } catch (err) {
+        showInlineRegisterAlert(err.message, "error");
+        btn.disabled = false;
+        btn.innerHTML = origText;
+      }
+    };
+
+    window.enablePhoneEdit = () => {
+      const phoneInput = document.getElementById("tr-phone");
+      phoneInput.readOnly = false;
+      phoneInput.style.background = "";
+      phoneInput.style.borderColor = "";
+      document.getElementById("tr-otp-box").style.display = "none";
+      document.getElementById("btn-tr-submit").style.display = "none";
+      const btn = document.getElementById("btn-tr-req-otp");
+      btn.style.display = "block";
+      btn.disabled = false;
+      btn.innerHTML = '📲 إرسال رمز التحقق OTP';
+      const editBtn = document.getElementById("btn-tr-edit-phone");
+      if (editBtn) editBtn.style.display = "none";
+      phoneInput.focus();
+    };
+
+    window.handleTeacherRegister = async (e) => {
+      e.preventDefault();
+      hideBanner();
+      const phone = document.getElementById("tr-phone").value.trim();
+      const name = document.getElementById("tr-name").value.trim();
+      const pass = document.getElementById("tr-pass").value;
+      const serial = document.getElementById("tr-serial").value.trim();
+      const otpCode = document.getElementById("tr-otp-code").value.trim();
+      const btn = document.getElementById("btn-tr-submit");
+
+      if (!currentChallengeToken || !otpCode || otpCode.length !== 6) {
+        showInlineRegisterAlert("⚠️ أدخل كود الـ OTP المكون من 6 أرقام كاملاً", "error");
+        return;
+      }
+
+      const origBtnText = btn.innerHTML;
+      btn.disabled = true;
+      btn.innerHTML = '⏳ جاري التحقق من الكود وإنشاء الحساب...';
+      try {
+        const res = await window.v3API.teacherRegister({
+          phone, full_name: name, password: pass,
+          serial_code: serial || undefined,
+          challenge_token: currentChallengeToken,
+          otp_code: otpCode,
+        });
+        if (res.status === "approved" && res.access_token) {
+          window.location.href = "/store";
+        } else if (res.status === "pending_approval") {
+          showTeacherRadar(res.full_name, res.serial_code, phone);
+        }
+      } catch (err) {
+        showInlineRegisterAlert(err.message, "error");
+        btn.disabled = false;
+        btn.innerHTML = origBtnText;
+      }
+    };
+
+    window.requestResetOtp = async () => {
+      hideBanner();
+      const phone = document.getElementById("treset-phone").value.trim();
+      if (!phone) { showBanner("أدخل رقم هاتفك المسجل"); return; }
+      try {
+        const res = await window.v3API.requestOtp({ phone, target_role: "teacher", purpose: "reset_password" });
+        currentChallengeToken = res.challenge_token;
+        document.getElementById("treset-otp-box").style.display = "block";
+        document.getElementById("btn-treset-submit").style.display = "block";
+        document.getElementById("btn-treset-req").style.display = "none";
+        if (res.telegram_otp_url) {
+          const tg = document.getElementById("treset-tg-link");
+          tg.style.display = "inline-flex";
+          tg.onclick = (ev) => { ev.preventDefault(); openTelegramSafe(res.telegram_otp_url); };
+        }
+        showBanner(res.message, "info");
+      } catch (err) {
+        showBanner(err.message);
+      }
+    };
+
+    window.handleTeacherResetPass = async (e) => {
+      e.preventDefault();
+      hideBanner();
+      const phone = document.getElementById("treset-phone").value.trim();
+      const otpCode = document.getElementById("treset-otp-code").value.trim();
+      const newPass = document.getElementById("treset-newpass").value;
+      if (!currentChallengeToken || !otpCode || !newPass) {
+        showBanner("أكمل إدخال رمز التحقق وكلمة السر الجديدة");
+        return;
+      }
+      try {
+        const res = await window.v3API.teacherResetPassword({
+          phone, challenge_token: currentChallengeToken, otp_code: otpCode, new_password: newPass
+        });
+        if (res.status === "approved" && res.access_token) {
+          window.location.href = "/store";
+        } else {
+          showTeacherRadar(res.full_name, res.serial_code, phone);
+        }
+      } catch (err) {
+        showBanner(err.message);
+      }
+    };
+
+    function showTeacherRadar(fullName, serialCode, phone) {
+      document.getElementById("form-t-login").style.display = "none";
+      document.getElementById("form-t-register").style.display = "none";
+      document.getElementById("form-t-reset").style.display = "none";
+      document.getElementById("t-pending-radar").style.display = "block";
+      document.getElementById("t-pend-name").textContent = fullName || phone;
+      document.getElementById("t-pend-serial").textContent = "🔑 " + serialCode;
+
+      if (teacherRadarInterval) clearInterval(teacherRadarInterval);
+      teacherRadarInterval = setInterval(async () => {
+        try {
+          const st = await window.v3API.teacherStatus(phone);
+          if (st.status === "approved" && st.access_token) {
+            clearInterval(teacherRadarInterval);
+            localStorage.setItem("access_token", st.access_token);
+            localStorage.setItem("current_user", JSON.stringify(st.user));
+            window.location.href = "/store";
+          } else if (st.status === "rejected") {
+            clearInterval(teacherRadarInterval);
+            showBanner("⛔ تم رفض طلب الاعتماد من قبل الإدارة.");
+          }
+        } catch (_) {}
+      }, 3000);
+    }
+
+    window.handleWebAdminLogin = async (e) => {
+      e.preventDefault();
+      hideBanner();
+      const pass = document.getElementById("web-admin-pass").value;
+      const btn = document.getElementById("btn-web-adm-submit");
+      btn.disabled = true;
+      try {
+        const res = await window.v3API.adminVaultLogin(pass);
+        window.location.href = "/admin";
+      } catch (err) {
+        showBanner(err.message);
+        btn.disabled = false;
+      }
+    };
+  </script>
+</body>
+</html>

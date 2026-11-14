@@ -1,0 +1,38 @@
+# Environments & Git
+.git/
+.venv/
+venv/
+ENV/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+
+# Local tunnels, logs, SQLite WAL/SHM & local secrets
+cloudflared.exe
+ngrok.exe
+*.log
+*.db-journal
+*.db-wal
+*.db-shm
+.jwt_secret
+Z-PACT-main/.jwt_secret
+.env
+Z-PACT-main/.env
+payment_webhook/.env
+~$*
+.DS_Store
+Thumbs.db
+
+# Ephemeral stamped outputs & backups (keep webpdf_elite.db + originals + covers + frames + logos + receipts)
+Z-PACT-main/storage/stamped/*
+!Z-PACT-main/storage/stamped/.gitkeep
+Z-PACT-main/storage/previews/*
+!Z-PACT-main/storage/previews/.gitkeep
+Z-PACT-main/backups/*
+
+# Android Studio project source (root Z-PACT-*.apk files are kept)
+android_app/
+Z-PACT-Enterprise.apk

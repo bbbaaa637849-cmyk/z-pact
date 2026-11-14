@@ -1,0 +1,189 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg_obsidian">
+
+    <!-- شريط الرأس المخصص (Top App Bar) لنسخة الإدارة والرادار -->
+    <RelativeLayout
+        android:id="@+id/header_layout"
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:layout_alignParentTop="true"
+        android:background="@color/bg_card"
+        android:paddingHorizontal="12dp">
+
+        <TextView
+            android:id="@+id/tv_app_title"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_alignParentStart="true"
+            android:layout_centerVertical="true"
+            android:fontFamily="sans-serif-black"
+            android:text="⚡ Z-PACT v3.0"
+            android:textColor="@color/neon_cyan"
+            android:textSize="16sp" />
+
+        <!-- كبسولة حالة رادار الـ SMS (تنبض بالأخضر عند التفعيل) -->
+        <LinearLayout
+            android:id="@+id/pill_radar_status"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_centerVertical="true"
+            android:layout_toStartOf="@id/btn_refresh_page"
+            android:layout_marginEnd="6dp"
+            android:background="@drawable/bg_radar_pill"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:clickable="true"
+            android:focusable="true">
+
+            <View
+                android:id="@+id/indicator_radar_dot"
+                android:layout_width="8dp"
+                android:layout_height="8dp"
+                android:background="@color/status_green" />
+
+            <TextView
+                android:id="@+id/tv_radar_pill_text"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="6dp"
+                android:fontFamily="sans-serif-medium"
+                android:text="رادار الـ SMS نشط"
+                android:textColor="@color/text_primary"
+                android:textSize="11sp" />
+        </LinearLayout>
+
+        <!-- زر مخصص لإعادة التحديث اليدوي فقط (بدلاً من السحب المزعج) -->
+        <ImageButton
+            android:id="@+id/btn_refresh_page"
+            android:layout_width="38dp"
+            android:layout_height="38dp"
+            android:layout_centerVertical="true"
+            android:layout_toStartOf="@id/btn_server_settings"
+            android:layout_marginEnd="2dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="تحديث الصفحة"
+            android:src="@drawable/ic_refresh"
+            app:tint="@color/neon_cyan" />
+
+        <!-- زر ضبط إعدادات الخادم والـ API -->
+        <ImageButton
+            android:id="@+id/btn_server_settings"
+            android:layout_width="38dp"
+            android:layout_height="38dp"
+            android:layout_alignParentEnd="true"
+            android:layout_centerVertical="true"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="Server Config"
+            android:src="@drawable/ic_settings"
+            app:tint="@color/text_secondary" />
+
+    </RelativeLayout>
+
+    <!-- خط فاصل نيون متدرج أسفل الترويسة -->
+    <View
+        android:id="@+id/header_divider"
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:layout_below="@id/header_layout"
+        android:background="@color/border_glass" />
+
+    <!-- شريط تقدم تحميل الصفحة -->
+    <ProgressBar
+        android:id="@+id/progress_loading"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="3dp"
+        android:layout_below="@id/header_divider"
+        android:max="100"
+        android:progressDrawable="@color/neon_cyan"
+        android:visibility="gone" />
+
+    <!-- حاوية العرض الهجينة بدون SwipeRefreshLayout لمنع أي تحديث عشوائي عند التمرير -->
+    <FrameLayout
+        android:id="@+id/web_container"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_above="@id/bottom_navigation"
+        android:layout_below="@id/header_divider">
+
+        <!-- متصفح الويب المدمج فائق الأداء مع دعم التمرير السلس الكامل -->
+        <WebView
+            android:id="@+id/web_view"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:overScrollMode="ifContentScrolls"
+            android:scrollbars="vertical"
+            android:background="@color/bg_obsidian" />
+
+        <!-- واجهة الخطأ عند تعذر الاتصال بالسيرفر مع خيار إعادة المحاولة -->
+        <LinearLayout
+            android:id="@+id/layout_connection_error"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="@color/bg_obsidian"
+            android:gravity="center"
+            android:orientation="vertical"
+            android:padding="24dp"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:fontFamily="sans-serif-black"
+                android:text="📡 تعذر الاتصال بالمنصة"
+                android:textColor="@color/text_primary"
+                android:textSize="20sp" />
+
+            <TextView
+                android:id="@+id/tv_error_details"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:gravity="center"
+                android:text="تأكد من اتصال هاتفك بالإنترنت ثم اضغط إعادة المحاولة."
+                android:textColor="@color/text_muted"
+                android:textSize="13sp" />
+
+            <Button
+                android:id="@+id/btn_retry_connection"
+                android:layout_width="wrap_content"
+                android:layout_height="48dp"
+                android:layout_marginTop="20dp"
+                android:background="@drawable/bg_button_neon"
+                android:paddingHorizontal="24dp"
+                android:text="🔄 إعادة المحاولة الآن"
+                android:textColor="@color/text_dark"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/btn_error_open_settings"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="⚙️ تعديل رابط السيرفر (Server IP)"
+                android:textColor="@color/neon_cyan"
+                android:textSize="14sp" />
+        </LinearLayout>
+
+    </FrameLayout>
+
+    <!-- شريط التنقل السفلي الأصيل لنسخة الإدارة -->
+    <com.google.android.material.bottomnavigation.BottomNavigationView
+        android:id="@+id/bottom_navigation"
+        android:layout_width="match_parent"
+        android:layout_height="64dp"
+        android:layout_alignParentBottom="true"
+        android:background="@color/nav_background"
+        app:elevation="8dp"
+        app:itemIconSize="22dp"
+        app:itemIconTint="@color/nav_active"
+        app:itemTextColor="@color/text_primary"
+        app:labelVisibilityMode="labeled"
+        app:menu="@menu/bottom_nav_menu" />
+
+</RelativeLayout>

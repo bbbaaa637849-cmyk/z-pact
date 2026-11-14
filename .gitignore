@@ -1,0 +1,57 @@
+# ================================================================
+# Z-PACT Enterprise Ecosystem — Root .gitignore (Private Repo Ready)
+# ================================================================
+
+# 1. بيئات البايثون والكاش
+.venv/
+venv/
+ENV/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+
+# 2. ملفات السجلات والمؤقتات والبيئة المحلية
+*.log
+*.db-journal
+*.db-wal
+*.db-shm
+.env
+Z-PACT-main/.env
+payment_webhook/.env
+.jwt_secret
+Z-PACT-main/.jwt_secret
+~$*
+.DS_Store
+Thumbs.db
+
+# 3. مجلدات المخرجات المؤقتة فقط (مع الإبقاء على قاعدة البيانات والمواد الأصلية)
+Z-PACT-main/storage/stamped/*
+!Z-PACT-main/storage/stamped/.gitkeep
+Z-PACT-main/storage/previews/*
+!Z-PACT-main/storage/previews/.gitkeep
+storage/bot_tmp/
+Z-PACT-main/backups/*
+
+# 4. أدوات الأنفاق الثنائية الكبيرة (يتم تحميلها في تجهيز_اللاب_الثاني.bat)
+cloudflared.exe
+ngrok.exe
+
+# 5. مخرجات وكاش بناء الأندرويد الثقيلة + إعدادات SDK المحلية للجهاز
+android_app/.gradle/
+android_app/local.properties
+android_app/.idea/
+android_app/build/
+android_app/app/build/
+*.iml
+*.aab
+*.idsig
+
+# الإبقاء على نسخ الـ APK الجاهزة في الجذر فقط واستثناء النسخ المكررة داخل android_app
+android_app/*.apk
+Z-PACT-Enterprise.apk
+
+# الإبقاء على Gradle Wrapper الأساسي لضمان البناء محلياً وعلى GitHub Actions
+!android_app/gradle/wrapper/gradle-wrapper.jar
