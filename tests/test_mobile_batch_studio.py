@@ -1313,6 +1313,98 @@ class TestIsolatedMobileStudioBridgeAPI(unittest.TestCase):
         finally:
             db2.close()
 
+    def test_16_pdf_compression_bloat_removal_and_bulk_hidden_marks(self):
+        """التحقق من إزالة XML/StructTreeRoot، وتقليص الخطوط (subset)، ومنع الشفافية الزائدة، وتسجيل العلامات المخفية دفعة واحدة"""
+        import fitz
+        from app.models import HiddenMark, Material, Purchase
+
+        # 1. بناء ملف PDF اختباري مثقّل بملفات XML مرفقة وشجرة وسوم StructTreeRoot
+        src_doc = fitz.open()
+        for i in range(2):
+            page = src_doc.new_page(width=595, height=842)
+            page.insert_text((72, 100), f"Sample Page {i + 1}", fontsize=14)
+        src_doc.embfile_add("equation-1.xml", b"<math><mi>x</mi><mo>=</mo><mn>1</mn></math>")
+        src_doc.embfile_add("equation-2.xml", b"<math><mi>y</mi><mo>=</mo><mn>2</mn></math>")
+        struct_xref = src_doc.get_new_xref()
+        src_doc.update_object(struct_xref, "<< /Type /StructTreeRoot /K [] >>")
+        src_doc.xref_set_key(src_doc.pdf_catalog(), "StructTreeRoot", f"{struct_xref} 0 R")
+        bloated_bytes = src_doc.tobytes()
+        src_doc.close()
+
+        # 2. رفع المذكرة والتأكد من تنظيف البنية التلقائي فور الرفع
+        up_res = self.client.post(
+            "/api/internal/admin/materials/upload",
+            headers=self.headers,
+            data={"title": "مذكرة اختبار الضغط", "tag": "رياضيات", "price": "60", "price_coins": "60"},
+            files={"file": ("bloated_math.pdf", bloated_bytes, "application/pdf")},
+        )
+        self.assertEqual(up_res.status_code, 200, up_res.text)
+        mat_id = up_res.json()["id"]
+
+        db = self.TestingSession()
+        try:
+            mat = db.query(Material).filter(Material.id == mat_id).first()
+            self.assertIsNotNone(mat)
+            from app.config import settings
+            orig_rel = mat.original_pdf_path.replace("\\", "/")
+            if orig_rel.startswith("storage/"):
+                orig_abs = os.path.join(settings.STORAGE_DIR, orig_rel[len("storage/"):])
+            else:
+                orig_abs = orig_rel
+            self.assertTrue(os.path.isfile(orig_abs), f"Missing original at {orig_abs}")
+            with fitz.open(orig_abs) as orig_doc:
+                self.assertEqual(len(orig_doc), 2)
+                self.assertEqual(orig_doc.embfile_count(), 0)
+                st_type, _ = orig_doc.xref_get_key(orig_doc.pdf_catalog(), "StructTreeRoot")
+                self.assertEqual(st_type, "null")
+        finally:
+            db.close()
+
+        # 3. تشغيل الختم الفوري (One-Pass) والتحقق من صغر الحجم وسرعة القراءة والعلامات المخفية
+        stamp_res = self.client.post(
+            "/api/internal/orders/direct-stamp-sync",
+            headers=self.headers,
+            json={
+                "material_id": mat_id,
+                "buyer_name_stamp": "أ/ عمر محمود",
+                "buyer_phone_stamp": "01011223344",
+                "series_name": "سلسلة التفوق",
+            },
+        )
+        self.assertEqual(stamp_res.status_code, 200, stamp_res.text)
+        data = stamp_res.json()
+        self.assertEqual(data["status"], "completed")
+        p_id = data["purchase_id"]
+
+        db2 = self.TestingSession()
+        try:
+            purchase = db2.query(Purchase).filter(Purchase.id == p_id).first()
+            self.assertIsNotNone(purchase)
+            out_path = purchase.output_pdf_path
+            self.assertTrue(out_path and os.path.isfile(out_path))
+
+            # Cairo + Helvetica بعد subset_fonts يجب أن يكون صغيراً جداً (< 120KB)
+            out_size = os.path.getsize(out_path)
+            self.assertLess(out_size, 120 * 1024, f"Stamped PDF unexpectedly large ({out_size} bytes)")
+
+            with fitz.open(out_path) as out_doc:
+                self.assertEqual(len(out_doc), 2)
+                self.assertEqual(out_doc.embfile_count(), 0)
+                st_out, _ = out_doc.xref_get_key(out_doc.pdf_catalog(), "StructTreeRoot")
+                self.assertEqual(st_out, "null")
+                # التأكد من عدم وجود مجموعات شفافية alpha (ca 0.05) في الموارد
+                for page in out_doc:
+                    res_str = out_doc.xref_object(page.xref) or ""
+                    self.assertNotIn("fitzca", res_str)
+                # العلامة المخفية لا تزال مقروءة عبر النص العادي
+                self.assertIn(f"E-{p_id}-", out_doc[0].get_text("text"))
+
+            marks = db2.query(HiddenMark).filter(HiddenMark.purchase_id == p_id).all()
+            self.assertEqual(len(marks), 8)  # صفحتان × 4 زوايا
+            self.assertTrue(all(m.mark_code.startswith(f"E-{p_id}-") for m in marks))
+        finally:
+            db2.close()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -30,7 +30,7 @@ from app import crud, schemas, models
 from app.auth import decode_access_token, get_current_user, require_admin
 from app.database import get_db
 from app.models import User, Review, Purchase, PurchaseStatus
-from app.stamper import run_test_stamp, process_frame_image_to_transparent_png
+from app.stamper import run_test_stamp, process_frame_image_to_transparent_png, optimize_original_pdf_file
 from app.routers import jobs as jobs_store
 from app.config import settings
 from app.logger import logger
@@ -192,6 +192,7 @@ async def upload_material(
     try:
         with open(file_path, "wb") as f:
             shutil.copyfileobj(pdf_file.file, f)
+        await asyncio.to_thread(optimize_original_pdf_file, file_path)
         logger.info(f"✓ [Upload] File saved to {file_path}")
     except Exception as e:
         logger.error(f"❌ [Upload Error] Failed to save file: {e}")

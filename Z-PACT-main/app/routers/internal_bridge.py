@@ -1121,6 +1121,12 @@ async def admin_upload_material(
     with open(file_path, "wb") as f:
         f.write(content)
 
+    try:
+        from app.stamper import optimize_original_pdf_file
+        await asyncio.to_thread(optimize_original_pdf_file, file_path)
+    except Exception:
+        pass
+
     total_pages = 1
     cover_image_path = None
     try:
@@ -1767,7 +1773,10 @@ async def direct_stamp_sync_endpoint(
 
     async with STAMP_SEMAPHORE:
         try:
-            stamped_path = await asyncio.to_thread(
+            from app.stamper import OUTPUT_DIR as STAMPER_OUT_DIR
+            final_target_path = f"{STAMPER_OUT_DIR}/{purchase.id}_final.pdf"
+            mark_entries: list[dict] = []
+            final_path = await asyncio.to_thread(
                 _stamp_native,
                 purchase.id,
                 pdf_path,
@@ -1782,28 +1791,13 @@ async def direct_stamp_sync_endpoint(
                 None,
                 phone2,
                 True,  # fast_batch=True لتقليل ضغط المعالج
+                final_target_path,
+                bool(mat.compression_enabled),
+                False,
+                mark_entries,
             )
-            def _finalize_in_thread():
-                t_db = SessionLocal()
-                try:
-                    return _add_marks_and_finalize(
-                        db=t_db,
-                        input_path=stamped_path,
-                        purchase_id=purchase.id,
-                        buyer_name=buyer_name,
-                        buyer_phone=phone1,
-                        compress=bool(mat.compression_enabled),
-                        is_encrypted=False,
-                    )
-                finally:
-                    t_db.close()
-
-            final_path = await asyncio.to_thread(_finalize_in_thread)
-            try:
-                if os.path.exists(stamped_path) and stamped_path != final_path:
-                    os.remove(stamped_path)
-            except Exception:
-                pass
+            if mark_entries:
+                crud.record_hidden_marks_bulk(db, mark_entries)
 
             crud.update_purchase_status(db, purchase.id, PurchaseStatus.COMPLETED, output_path=final_path)
             order.stamped_pdf_path = final_path

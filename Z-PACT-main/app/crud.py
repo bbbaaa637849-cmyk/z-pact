@@ -642,6 +642,26 @@ def record_hidden_mark(
     return mark
 
 
+def record_hidden_marks_bulk(db: Session, entries: list[dict]) -> int:
+    """تسجيل مجموعة علامات مخفية دفعة واحدة لتفادي تكرار عمليات الحفظ البطيئة."""
+    if not entries:
+        return 0
+    marks = [
+        models.HiddenMark(
+            purchase_id=e["purchase_id"],
+            mark_code=e["mark_code"],
+            page_number=e["page_number"],
+            x_position=e["x_pct"],
+            y_position=e["y_pct"],
+            mark_type=e.get("mark_type", models.MarkType.INVISIBLE_TEXT),
+        )
+        for e in entries
+    ]
+    db.add_all(marks)
+    db.commit()
+    return len(marks)
+
+
 def find_purchase_by_mark_code(db: Session, mark_code: str) -> Optional[models.Purchase]:
     """
     تتبع التسريب — البحث عن عملية الشراء بواسطة كود العلامة المخفية.

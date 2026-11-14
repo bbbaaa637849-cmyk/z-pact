@@ -246,6 +246,181 @@ def process_frame_image_to_transparent_png(
     return out_path
 
 
+def _strip_pdf_structural_bloat(doc: fitz.Document) -> None:
+    """
+    حذف الهياكل غير المرئية الثقيلة (مثل أشجار Accessibility الضخمة والملفات XML المرفقة لمعادلات Word)
+    التي تضخم حجم الـ PDF وتبطئ فتحه وعرض النصوص دون أي تأثير على النصوص المرئية أو البحث أو الجودة المتجهة.
+    """
+    try:
+        cat = doc.pdf_catalog()
+        if not cat:
+            return
+        for key in ("StructTreeRoot", "MarkInfo"):
+            try:
+                doc.xref_set_key(cat, key, "null")
+            except Exception:
+                pass
+        try:
+            nkind, nval = doc.xref_get_key(cat, "Names")
+            if nkind == "xref":
+                nx = int(nval.split()[0])
+                doc.xref_set_key(nx, "EmbeddedFiles", "null")
+            elif nkind == "dict":
+                doc.xref_set_key(cat, "Names/EmbeddedFiles", "null")
+        except Exception:
+            pass
+        for pno in range(len(doc)):
+            try:
+                doc.xref_set_key(doc[pno].xref, "StructParents", "null")
+            except Exception:
+                pass
+    except Exception as e:
+        logger.debug(f"[Stamper] Structural bloat cleanup skipped: {e}")
+
+
+def _optimize_heavy_images_safe(
+    doc: fitz.Document,
+    min_raw_bytes: int = 180_000,
+    min_jpx_bytes: int = 120_000,
+    max_dim: int = 1600,
+    jpeg_quality: int = 82,
+) -> int:
+    """
+    ضغط الصور الضخمة المستقلة (وخاصة أغلفة JPEG2000 الثقيلة والصور ذات الدقة المفرطة) إلى JPEG متوازن
+    بسرعة معالجة عالية، مع تجنب الأقنعة الشفافة (SMask/Mask) وأنماط الـ Pattern لحماية وضوح الصفحات بالكامل.
+    """
+    try:
+        from PIL import Image
+    except Exception:
+        return 0
+
+    smask_xrefs: set[int] = set()
+    try:
+        for x in range(1, doc.xref_length()):
+            if not doc.xref_is_stream(x):
+                continue
+            if doc.xref_get_key(x, "Subtype")[1] != "/Image":
+                continue
+            for mk in ("SMask", "Mask"):
+                mk_t, mk_v = doc.xref_get_key(x, mk)
+                if mk_t == "xref":
+                    try:
+                        smask_xrefs.add(int(mk_v.split()[0]))
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+    replaced = 0
+    seen: set[int] = set()
+    for page in doc:
+        try:
+            images = page.get_images(full=True)
+        except Exception:
+            continue
+        for im in images:
+            xr, smask = im[0], im[1]
+            if xr in seen or smask or xr in smask_xrefs:
+                continue
+            seen.add(xr)
+            try:
+                if doc.xref_get_key(xr, "ImageMask")[1] == "true":
+                    continue
+                if doc.xref_get_key(xr, "SMask")[0] != "null" or doc.xref_get_key(xr, "Mask")[0] != "null":
+                    continue
+                raw = doc.xref_stream_raw(xr)
+                if not raw:
+                    continue
+                flt = doc.xref_get_key(xr, "Filter")[1]
+                is_jpx = "JPXDecode" in flt
+                if not ((is_jpx and len(raw) >= min_jpx_bytes) or len(raw) >= min_raw_bytes):
+                    continue
+                info = doc.extract_image(xr)
+                if not info or info.get("smask") or not info.get("image"):
+                    continue
+                img = Image.open(io.BytesIO(info["image"]))
+                if img.mode in ("RGBA", "LA", "P") and "transparency" in img.info:
+                    continue
+                if img.mode not in ("RGB", "L"):
+                    img = img.convert("RGB")
+                w, h = img.size
+                if max(w, h) > max_dim:
+                    scale = max_dim / float(max(w, h))
+                    img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=jpeg_quality, optimize=True)
+                jb = buf.getvalue()
+                if len(jb) < len(raw) * (0.95 if is_jpx else 0.78):
+                    page.replace_image(xr, stream=jb)
+                    replaced += 1
+            except Exception:
+                continue
+    return replaced
+
+
+def optimize_pdf_document(
+    doc: fitz.Document,
+    optimize_images: bool = True,
+    subset_fonts: bool = True,
+) -> None:
+    """تنفيذ حزمة تحسين متكاملة على مستند PDF مفتوح لتقليص الحجم وتسريع العرض."""
+    _strip_pdf_structural_bloat(doc)
+    if optimize_images:
+        _optimize_heavy_images_safe(doc)
+    if subset_fonts:
+        try:
+            doc.subset_fonts()
+        except Exception as e:
+            logger.debug(f"[Stamper] Font subsetting skipped: {e}")
+
+
+def optimize_original_pdf_file(pdf_path: str) -> bool:
+    """
+    ضغط وتنظيف ملف PDF أصلي بأمان مرة واحدة (عند الرفع أو التهيئة) مع استبدال ذري للملف
+    فقط عندما يقل الحجم أو تُزال الهياكل المتضخمة دون المساس بعدد الصفحات أو المحتوى.
+    """
+    if not pdf_path or not os.path.exists(pdf_path):
+        return False
+    orig_size = os.path.getsize(pdf_path)
+    tmp_path = f"{pdf_path}.opt.tmp"
+    try:
+        doc = fitz.open(pdf_path)
+        try:
+            orig_pages = len(doc)
+            if orig_pages <= 0:
+                return False
+            had_bloat = (
+                doc.embfile_count() > 0
+                or doc.xref_get_key(doc.pdf_catalog(), "StructTreeRoot")[0] != "null"
+            )
+            save_optimized_pdf(doc, tmp_path, compress=True, fast_batch=True, optimize_images=True)
+        finally:
+            doc.close()
+
+        if not os.path.exists(tmp_path):
+            return False
+        new_size = os.path.getsize(tmp_path)
+        chk = fitz.open(tmp_path)
+        try:
+            valid = (len(chk) == orig_pages and new_size > 100)
+        finally:
+            chk.close()
+
+        if valid and (new_size < orig_size * 0.97 or (had_bloat and new_size <= orig_size * 1.01)):
+            os.replace(tmp_path, pdf_path)
+            logger.info(f"✓ [Optimize] {os.path.basename(pdf_path)}: {orig_size // 1024}KB -> {new_size // 1024}KB")
+            return True
+    except Exception as e:
+        logger.warning(f"⚠️ [Optimize] Skipped {os.path.basename(pdf_path)}: {e}")
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+    return False
+
+
 def save_optimized_pdf(
     doc: fitz.Document,
     output_path: str,
@@ -254,26 +429,28 @@ def save_optimized_pdf(
     user_pw: Optional[str] = None,
     owner_pw: Optional[str] = None,
     fast_batch: bool = False,
+    optimize_images: bool = True,
+    fast_intermediate: bool = False,
 ) -> None:
     """
     حفظ وضغط الـ PDF بأقصى درجة كفاءة دون التأثير على جودة الخطوط المتجهية والعلامات الأمنية.
-    في وضع المعالجة المحلية الخفيفة (fast_batch / LOW_CPU_MODE) يتم تقليل عمليات إعادة فحص الكائنات المرهقة للمعالج.
+    يزيل التضخم الهيكلي غير المرئي ويقتطع الخطوط (Font Subsetting) ويضغط الكائنات والصور الثقيلة.
     """
     save_options = {}
-    if compress and (fast_batch or LOW_CPU_MODE):
+    if fast_intermediate:
         save_options.update({
-            "garbage": 1,
-            "deflate": True,
-            "deflate_images": True,
-            "clean": False,
+            "garbage": 0,
+            "deflate": False,
         })
     elif compress:
+        optimize_pdf_document(doc, optimize_images=optimize_images, subset_fonts=True)
         save_options.update({
-            "garbage": 4,
+            "garbage": 3,
             "deflate": True,
             "deflate_images": True,
             "deflate_fonts": True,
-            "clean": True,
+            "use_objstms": True,
+            "clean": False,
         })
     else:
         save_options.update({
@@ -362,9 +539,11 @@ async def stamp_pdf(
             effective_wm_type = getattr(purchase, "watermark_type", None) or watermark_type or "none"
             effective_wm_text = getattr(purchase, "watermark_text", None) or watermark_text
 
-            # --- الخطوة 1: ختم بـ PyMuPDF (Vector-Preserving) ---
+            # --- الخطوة 1: ختم وإضافة العلامات وضغط نهائي في مرور واحد (One-Pass Vector-Preserving) ---
+            final_target_path = f"{OUTPUT_DIR}/{purchase_id}_final.pdf"
+            mark_entries: list[dict] = []
             try:
-                stamped_path = await asyncio.wait_for(
+                final_path = await asyncio.wait_for(
                     asyncio.to_thread(
                         _stamp_native,
                         purchase_id,
@@ -380,43 +559,23 @@ async def stamp_pdf(
                         effective_wm_logo,
                         buyer_phone_2,
                         fast_batch or LOW_CPU_MODE,
+                        final_target_path,
+                        compress,
+                        is_encrypted,
+                        mark_entries,
                     ),
                     timeout=600.0  # 10 دقائق
                 )
             except asyncio.TimeoutError:
                 raise Exception("تخطى محرك الختم المهلة الزمنية (10 دقائق). الملف كبير جداً أو السيرفر مشغول.")
 
-            logger.info(f"✓ [Stamper] Native stamping finished for {purchase_id}")
-
-            # --- التحقق الأمني ---
-            if not os.path.exists(stamped_path) or os.path.getsize(stamped_path) < 100:
-                raise Exception(f"فشل توليد الملف: الملف الناتج غير صالح (size={os.path.getsize(stamped_path) if os.path.exists(stamped_path) else 0})")
-
-            check_doc = fitz.open(stamped_path)
-            check_pages = len(check_doc)
-            check_doc.close()
-            original_doc = fitz.open(resolved_material_path)
-            original_pages = len(original_doc)
-            original_doc.close()
-            logger.info(f"[Stamper] Verification for {purchase_id}: stamped_pages={check_pages}, original_pages={original_pages}")
-
-            if check_pages != original_pages:
-                raise Exception(f"خرق أمني: الملف الناتج به {check_pages} صفحة بدلاً من {original_pages}.")
-
-            # --- الخطوة 2: إضافة علامات مخفية ---
-            logger.info(f"⏳ [Stamper] Adding hidden marks for {purchase_id}...")
-            final_path = _add_marks_and_finalize(
-                db           = db,
-                input_path   = stamped_path,
-                purchase_id  = purchase_id,
-                buyer_name   = buyer_name,
-                buyer_phone  = buyer_phone,
-                compress     = compress,
-                is_encrypted = is_encrypted,
-            )
-
             if not os.path.exists(final_path) or os.path.getsize(final_path) < 100:
                 raise Exception("فشل في المرحلة النهائية من معالجة الملف")
+
+            if mark_entries:
+                crud.record_hidden_marks_bulk(db, mark_entries)
+
+            logger.info(f"✓ [Stamper] One-pass stamping & optimization finished for {purchase_id}")
 
             # --- الخطوة 3: تحديث قاعدة البيانات ---
             purchase = crud.update_purchase_status(
@@ -741,51 +900,74 @@ def _stamp_native(
     watermark_logo_path: Optional[str] = None,
     buyer_phone_2:  Optional[str] = None,
     fast_batch:     bool = False,
+    finalize_to_path: Optional[str] = None,
+    compress:       bool = True,
+    is_encrypted:   bool = False,
+    marks_out:      Optional[list] = None,
 ) -> str:
     """
     يفتح الـ PDF الأصلي ويضيف الأختام والعلامات المائية مباشرة
     على الطبقة الفوقية (overlay) باستخدام PyMuPDF فقط.
-    بدون أي تحويل لصور — يحافظ على الجودة المتجهة 100%.
+    عند تمرير finalize_to_path يتم تضمين العلامات المخفية والضغط النهائي في تمريرة واحدة سريعة.
     """
     doc = fitz.open(material_path)
-    total_pages = len(doc)
+    try:
+        total_pages = len(doc)
 
-    clean_wm_type = (watermark_type or "none").strip().lower()
-    resolved_frame = _ensure_transparent_frame_cached(_resolve_asset_path(page_frame_path, "frames"))
+        clean_wm_type = (watermark_type or "none").strip().lower()
+        resolved_frame = _ensure_transparent_frame_cached(_resolve_asset_path(page_frame_path, "frames"))
 
-    # --- تجهيز اللوجو ---
-    logo_path = None
-    if clean_wm_type == "logo":
-        logo_path = _resolve_asset_path(watermark_logo_path, "logos")
-        if not logo_path:
-            logo_path = os.path.abspath(os.path.join(settings.BASE_DIR, "frontend", "assets", "logo.png"))
+        # --- تجهيز اللوجو ---
+        logo_path = None
+        if clean_wm_type == "logo":
+            logo_path = _resolve_asset_path(watermark_logo_path, "logos")
+            if not logo_path:
+                logo_path = os.path.abspath(os.path.join(settings.BASE_DIR, "frontend", "assets", "logo.png"))
 
-    effective_layout = stamp_layout if stamp_layout else get_default_stamp_elements()
+        effective_layout = stamp_layout if stamp_layout else get_default_stamp_elements()
 
-    # --- معالجة كل صفحة ---
-    for i in range(total_pages):
-        _apply_stamps_to_page(
-            page=doc[i],
-            page_num=i + 1,
-            total_pages=total_pages,
-            stamp_layout=effective_layout,
-            buyer_name=buyer_name,
-            buyer_phone=buyer_phone,
-            buyer_phone_2=buyer_phone_2,
-            doc_name_stamp=doc_name_stamp,
-            watermark_text=watermark_text,
-            watermark_type=watermark_type,
-            logo_path=logo_path,
-            material_tag=material_tag,
-            page_frame_path=resolved_frame,
-        )
+        # --- معالجة كل صفحة ---
+        for i in range(total_pages):
+            _apply_stamps_to_page(
+                page=doc[i],
+                page_num=i + 1,
+                total_pages=total_pages,
+                stamp_layout=effective_layout,
+                buyer_name=buyer_name,
+                buyer_phone=buyer_phone,
+                buyer_phone_2=buyer_phone_2,
+                doc_name_stamp=doc_name_stamp,
+                watermark_text=watermark_text,
+                watermark_type=watermark_type,
+                logo_path=logo_path,
+                material_tag=material_tag,
+                page_frame_path=resolved_frame,
+            )
 
-    # --- حفظ الملف ---
-    output_path = f"{OUTPUT_DIR}/{purchase_id}_stamped.pdf"
-    save_optimized_pdf(doc, output_path, compress=True, fast_batch=fast_batch)
-    doc.close()
-    logger.info(f"[Stamper] Saved stamped PDF: {os.path.getsize(output_path)//1024}KB, pages={total_pages}")
-    return output_path
+        if finalize_to_path:
+            _apply_hidden_marks_to_doc(doc, purchase_id, marks_out=marks_out)
+            output_path = finalize_to_path
+            save_optimized_pdf(
+                doc=doc,
+                output_path=output_path,
+                compress=compress,
+                is_encrypted=is_encrypted,
+                user_pw=buyer_phone if is_encrypted else None,
+                owner_pw=buyer_phone if is_encrypted else None,
+                fast_batch=fast_batch,
+            )
+            if len(doc) != total_pages:
+                raise Exception(f"خرق أمني: عدد الصفحات تغير أثناء المعالجة ({len(doc)} != {total_pages})")
+            logger.info(f"[Stamper] Final PDF saved (one-pass): {os.path.getsize(output_path)//1024}KB, pages={total_pages}")
+            return output_path
+
+        # --- حفظ الملف الوسيط (عند الاستدعاء المنفصل فقط) ---
+        output_path = f"{OUTPUT_DIR}/{purchase_id}_stamped.pdf"
+        save_optimized_pdf(doc, output_path, compress=True, fast_batch=fast_batch)
+        logger.info(f"[Stamper] Saved stamped PDF: {os.path.getsize(output_path)//1024}KB, pages={total_pages}")
+        return output_path
+    finally:
+        doc.close()
 
 
 # ================================================================
@@ -1150,6 +1332,70 @@ def _format_phone_number(phone: str) -> str:
 # بدون أي rasterization — يعمل مباشرة على الـ PDF المتجهي
 # ================================================================
 
+_MARK_HELV_FONT = None
+
+
+def _get_mark_font() -> fitz.Font:
+    global _MARK_HELV_FONT
+    if _MARK_HELV_FONT is None:
+        _MARK_HELV_FONT = fitz.Font("helv")
+    return _MARK_HELV_FONT
+
+
+def _apply_hidden_marks_to_doc(
+    doc: fitz.Document,
+    purchase_id: int,
+    marks_out: Optional[list] = None,
+) -> list[dict]:
+    """
+    تطبيق العلامات المخفية والنقاط الأمنية في دفق واحد خفيف لكل صفحة بدون شفافية ألفا
+    لتجنب إجهاد عارضات الـ PDF وتسريع ظهور النصوص عند فتح الملف.
+    """
+    collected: list[dict] = marks_out if marks_out is not None else []
+    mark_font = _get_mark_font()
+
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        random_suffix = uuid.uuid4().hex[:6].upper()
+        short_mark = f"E-{purchase_id}-{random_suffix}"
+
+        width = page.rect.width
+        height = page.rect.height
+
+        # --- Steganography: نص مخفي في الزوايا عبر TextWriter واحد لكل صفحة ---
+        corners = [
+            (width * random.uniform(0.01, 0.15), height * random.uniform(0.01, 0.15)),
+            (width * random.uniform(0.85, 0.99), height * random.uniform(0.01, 0.15)),
+            (width * random.uniform(0.01, 0.15), height * random.uniform(0.85, 0.99)),
+            (width * random.uniform(0.85, 0.99), height * random.uniform(0.85, 0.99)),
+        ]
+
+        tw = fitz.TextWriter(page.rect)
+        for (x, y) in corners:
+            tw.append(fitz.Point(x, y), short_mark, font=mark_font, fontsize=1)
+            collected.append({
+                "purchase_id": purchase_id,
+                "page_number": page_num + 1,
+                "x_pct": (x / width) * 100,
+                "y_pct": (y / height) * 100,
+                "mark_code": short_mark,
+                "mark_type": MarkType.INVISIBLE_TEXT,
+            })
+        tw.write_text(page, color=(1, 1, 1), overlay=True)
+
+        # --- Micro-dots: رسم النقاط الأمنية عبر Shape واحد مصمت فاتح جداً (بدون Alpha Blending يبطئ العرض) ---
+        dot_rng = random.Random(purchase_id * 1000 + (page_num + 1))
+        shape = page.new_shape()
+        for _ in range(dot_rng.randint(4, 5)):
+            x_dot = (dot_rng.uniform(5.0, 95.0) / 100.0) * width
+            y_dot = (dot_rng.uniform(5.0, 95.0) / 100.0) * height
+            shape.draw_circle(fitz.Point(x_dot, y_dot), 1)
+        shape.finish(color=(0.955, 0.955, 0.955), fill=(0.955, 0.955, 0.955))
+        shape.commit(overlay=True)
+
+    return collected
+
+
 def _add_marks_and_finalize(
     db:          Session,
     input_path:  str,
@@ -1165,67 +1411,23 @@ def _add_marks_and_finalize(
     """
     output_path = f"{OUTPUT_DIR}/{purchase_id}_final.pdf"
     doc = fitz.open(input_path)
+    try:
+        from app import crud
+        mark_entries = _apply_hidden_marks_to_doc(doc, purchase_id)
+        crud.record_hidden_marks_bulk(db, mark_entries)
 
-    from app import crud
-    purchase = crud.get_purchase(db, purchase_id)
+        # --- إعداد خيارات الحفظ والضغط المحسن ---
+        save_optimized_pdf(
+            doc=doc,
+            output_path=output_path,
+            compress=compress,
+            is_encrypted=is_encrypted,
+            user_pw=buyer_phone if is_encrypted else None,
+            owner_pw=buyer_phone if is_encrypted else None,
+            fast_batch=LOW_CPU_MODE,
+        )
+    finally:
+        doc.close()
 
-    for page_num in range(len(doc)):
-        page = doc[page_num]
-        random_suffix = uuid.uuid4().hex[:6].upper()
-        short_mark = f"E-{purchase_id}-{random_suffix}"
-
-        width  = page.rect.width
-        height = page.rect.height
-
-        # --- Steganography: نص مخفي في الزوايا ---
-        corners = [
-            (width * random.uniform(0.01, 0.15), height * random.uniform(0.01, 0.15)),
-            (width * random.uniform(0.85, 0.99), height * random.uniform(0.01, 0.15)),
-            (width * random.uniform(0.01, 0.15), height * random.uniform(0.85, 0.99)),
-            (width * random.uniform(0.85, 0.99), height * random.uniform(0.85, 0.99)),
-        ]
-
-        for (x, y) in corners:
-            page.insert_text(
-                point    = fitz.Point(x, y),
-                text     = short_mark,
-                fontsize = 1,
-                color    = (1, 1, 1),  # أبيض تماماً
-            )
-            crud.record_hidden_mark(
-                db          = db,
-                purchase_id = purchase_id,
-                page_number = page_num + 1,
-                x_pct       = (x / width) * 100,
-                y_pct       = (y / height) * 100,
-                mark_code   = short_mark,
-                mark_type   = MarkType.INVISIBLE_TEXT,
-            )
-
-        # --- Micro-dots ---
-        dot_rng = random.Random(purchase_id * 1000 + (page_num + 1))
-        for _ in range(dot_rng.randint(4, 5)):
-            x_dot = (dot_rng.uniform(5.0, 95.0) / 100.0) * width
-            y_dot = (dot_rng.uniform(5.0, 95.0) / 100.0) * height
-            page.draw_circle(
-                center = fitz.Point(x_dot, y_dot),
-                radius = 1,
-                color  = (0.1, 0.1, 0.1),
-                fill   = (0.1, 0.1, 0.1),
-                stroke_opacity = 0.05,
-                fill_opacity = 0.05,
-            )
-
-    # --- إعداد خيارات الحفظ والضغط المحسن ---
-    save_optimized_pdf(
-        doc=doc,
-        output_path=output_path,
-        compress=compress,
-        is_encrypted=is_encrypted,
-        user_pw=buyer_phone if is_encrypted else None,
-        owner_pw=buyer_phone if is_encrypted else None,
-        fast_batch=LOW_CPU_MODE,
-    )
-    doc.close()
     logger.info(f"[Stamper] Final PDF saved: {os.path.getsize(output_path)//1024}KB")
     return output_path
