@@ -77,6 +77,9 @@ _HEADER_ALIASES: Dict[str, Tuple[str, ...]] = {
         "العلامه المائيه", "نص العلامه المائيه", "علامه مائيه", "ملاحظات الختم",
         "watermark", "watermark text", "watermark_text",
     ),
+    "watermark_type": (
+        "نوع العلامه المائيه", "نوع العلامه", "watermark type", "watermark_type",
+    ),
     "font_family": (
         "الخط", "نوع الخط", "font", "font family", "font_family",
     ),
@@ -95,6 +98,54 @@ _SKIP_VALUE_TOKENS = {
     "-", "—", "–", "--", "n/a", "na", "none", "null", "skip",
     "بدون", "بدون رقم", "لا يوجد", "غير متوفر", "تخطي", "تخطي ⏩", "اختياري",
 }
+
+
+_LOGO_WATERMARK_TOKENS = {
+    "لوجو", "لوقو", "شعار", "صوره", "لوجو صوره", "صوره لوجو",
+    "علامه مائيه صوره", "علامه صوره", "لوجو المدرس", "شعار المدرس",
+    "صوره المدرس", "صوره علامه مائيه", "لوجو/صوره", "صوره/لوجو",
+    "logo", "image", "img", "pic", "picture", "photo",
+    "watermark logo", "teacher logo", "logo watermark", "image watermark",
+}
+
+
+def is_logo_watermark_token(val: Any) -> bool:
+    """التحقق مما إذا كانت قيمة الخلية تشير إلى طلب علامة مائية بصورة (لوجو)."""
+    s = str(val or "").strip()
+    if not s:
+        return False
+    norm = normalize_arabic_text(s)
+    if norm in _LOGO_WATERMARK_TOKENS:
+        return True
+    tokens = set(norm.split())
+    allowed = {
+        "لوجو", "لوقو", "شعار", "صوره", "علامه", "مائيه", "المدرس",
+        "logo", "image", "img", "pic", "picture", "photo", "teacher", "watermark",
+    }
+    if tokens and tokens.issubset(allowed):
+        return any(t in tokens for t in ("لوجو", "لوقو", "شعار", "صوره", "logo", "image", "img", "pic", "picture", "photo"))
+    return False
+
+
+def _normalize_watermark_entry_fields(entry: Dict[str, Any]) -> None:
+    """توحيد حقول العلامة المائية في عنصر الدفعة لدعم اختيار (لوجو/صورة) بجانب النصوص."""
+    wm_type_raw = entry.get("watermark_type")
+    wm_text_raw = entry.get("watermark_text")
+
+    if is_logo_watermark_token(wm_type_raw) or is_logo_watermark_token(wm_text_raw):
+        entry["watermark_type"] = "logo"
+        entry.pop("watermark_text", None)
+        return
+
+    if wm_type_raw is not None:
+        wt_norm = normalize_arabic_text(str(wm_type_raw))
+        if wt_norm in ("نص", "كتابه", "text"):
+            entry["watermark_type"] = "text"
+        elif wt_norm in ("بدون", "لا", "none"):
+            entry["watermark_type"] = "none"
+            entry.pop("watermark_text", None)
+        else:
+            entry["watermark_type"] = str(wm_type_raw).strip().lower()
 
 
 def _is_skip_token(val: Any) -> bool:
@@ -119,8 +170,13 @@ def _map_header_cell(cell_val: Any, allow_fuzzy: bool = True) -> Optional[str]:
         return None
     if _looks_like_phone(str(cell_val or "")) or len(norm) < 4 or len(norm) > 28 or len(norm.split()) > 3:
         return None
-    # منع اعتبار قيم البيانات الفعلية (مثل: "مذكرة الرياضيات" أو "سلسلة التفوق" أو "مدرس أول") كصف عناوين
-    if norm.startswith(("مذكره ", "سلسله ", "كتاب ", "ملزمه ", "مستر ", "استاذ ", "دكتور ", "مدرس ")):
+    # منع اعتبار قيم البيانات الفعلية (مثل: "مذكرة الرياضيات" أو "سلسلة التفوق" أو "مستر محمد") كصف عناوين
+    if norm.startswith((
+        "مذكره ", "سلسله ", "كتاب ", "ملزمه ",
+        "مستر ", "استاذ ", "استاذه ", "دكتور ", "دكتوره ",
+        "مهندس ", "مهندسه ", "باشمهندس ", "كابتن ", "كوتش ",
+        "شيخ ", "ابله ", "معلم ", "تيتشر ", "مس ", "ميس ", "مدرس ",
+    )):
         return None
     for alias_norm, canonical in _NORMALIZED_HEADER_LOOKUP.items():
         if len(alias_norm) >= 4 and alias_norm in norm:
@@ -168,6 +224,8 @@ def _row_to_entry(
 
     if not entry:
         return None
+
+    _normalize_watermark_entry_fields(entry)
 
     # التحقق الموحد عبر stamp_settings.py:
     # - للأدمن: كل بيانات الختم اختيارية بالكامل ولا يُوسم أي صف كناقص.
@@ -347,6 +405,7 @@ def parse_text_teacher_entries(raw_text: str, is_admin: bool = False) -> List[Di
     def _flush_block():
         nonlocal current_block
         if current_block:
+            _normalize_watermark_entry_fields(current_block)
             if not (is_admin and stamp_settings.ADMIN_ALL_STAMP_FIELDS_OPTIONAL):
                 ok_stamp, _ = stamp_settings.validate_stamp_payload(current_block, is_admin=is_admin)
                 if not ok_stamp and not stamp_settings.has_any_available_stamp_data(current_block):
@@ -569,7 +628,7 @@ def build_excel_template_bytes(materials: Optional[List[Dict[str, Any]]] = None)
         ("رقم الهاتف", "يُفضّل وضع خلية الهاتف كنص Text؛ وإن كُتب رقم بدون 0 يعالجه البوت تلقائياً (اختياري للأدمن)"),
         ("المذكرة", "اسم المذكرة أو رقمها (ID)، أو اتركه فارغاً واختر مذكرة موحدة من البوت"),
         ("اسم السلسلة", "مثال: سلسلة التفوق (يمكن الاكتفاء به كبيان للختم)"),
-        ("العلامة المائية", "اتركه فارغاً لعدم وضع علامة مائية"),
+        ("العلامة المائية", "اكتب نص العلامة المائية، أو اكتب كلمة (لوجو) أو (صورة) لإرفاق صورة لوجو خاص بالمدرس من البوت، أو اتركه فارغاً"),
         ("هاتف 2", "رقم إضافي يظهر بالتبادل في الصفحات الداخلية"),
         ("الخط", "cairo / tahoma / arial / simplified / traditional / arabtype / naskh / times"),
         ("حجم الخط", "رقم مثل 14 أو 16 أو 18"),
@@ -724,6 +783,7 @@ def build_word_template_bytes(materials: Optional[List[Dict[str, Any]]] = None) 
     doc.add_heading("نموذج Z-PACT — بيانات ختم المذكرات للمدرسين", level=1)
     doc.add_paragraph(
         "أدخل بيانات المدرسين المتوفرة في الجدول أدناه (الاسم، الرقم، المذكرة، أو السلسلة — أي بيان متوفر يكفي، وللأدمن كل الأعمدة اختيارية). "
+        "كما يمكنك كتابة كلمة (لوجو) أو (صورة) في عمود العلامة المائية ليطلب منك البوت إرسال صورة شعار المدرس. "
         "عند الانتهاء أرسل هذا الملف مباشرة إلى بوت الأدمن وسيقوم بختم وإرسال الملفات واحداً تلو الآخر بهدوء بدون ضغط على المعالج."
     )
 

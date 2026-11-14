@@ -1405,6 +1405,210 @@ class TestIsolatedMobileStudioBridgeAPI(unittest.TestCase):
         finally:
             db2.close()
 
+    def test_17_smart_titles_dynamic_font_scaling_and_batch_logo_watermarks(self):
+        """التحقق من: عدم تكرار (أ / مستر)، تصغير الخط الديناميكي للنصوص الطويلة في كل الأختام، ودعم لوجو المدرسين في الإكسيل والختم المباشر."""
+        from PIL import Image
+        import openpyxl
+        import unicodedata
+        from app.models import Purchase
+        from app.stamper import _compute_dynamic_font_size, _get_font
+        from bot_service.services.batch_parser import parse_excel_bytes, is_logo_watermark_token
+
+        # 1) بناء مذكرة ثنائية الصفحة
+        pdf_buf = io.BytesIO()
+        doc = fitz.open()
+        for idx in range(2):
+            pg = doc.new_page(width=595, height=842)
+            pg.insert_text((80, 120), f"Sample Page {idx + 1}", fontsize=16)
+        doc.save(pdf_buf)
+        doc.close()
+
+        up_res = self.client.post(
+            "/api/internal/admin/materials/upload",
+            headers=self.headers,
+            data={"title": "مذكرة المسميات والتصغير", "tag": "الرياضيات", "price": "50", "price_coins": "50"},
+            files={"file": ("dynamic_scale.pdf", pdf_buf.getvalue(), "application/pdf")},
+        )
+        self.assertEqual(up_res.status_code, 200, up_res.text)
+        mat_id = up_res.json()["id"]
+
+        # إعداد تخطيط نصي يتضمن ختم غلاف page=1 (44pt) وأختام داخلية (14pt) وعلامة مائية قطرية (100pt)
+        text_layout = [
+            {"type": "doc_name", "x_pct": 50, "y_pct": 55, "font_size": 44, "color": "#0F172A", "font_family": "cairo", "is_bold": True, "page": 1, "excluded_pages": [], "opacity": 1.0, "rotation": 0},
+            {"type": "name", "x_pct": 75, "y_pct": 4, "font_size": 14, "color": "#0F172A", "font_family": "cairo", "page": 0, "excluded_pages": [1], "opacity": 0.9, "rotation": 0},
+            {"type": "phone", "x_pct": 25, "y_pct": 4, "font_size": 14, "color": "#0F172A", "font_family": "cairo", "page": 0, "excluded_pages": [1], "opacity": 0.9, "rotation": 0},
+            {"type": "doc_name", "x_pct": 75, "y_pct": 96, "font_size": 14, "color": "#0F172A", "font_family": "cairo", "page": 0, "excluded_pages": [1], "opacity": 0.9, "rotation": 0},
+            {"type": "watermark", "x_pct": 50, "y_pct": 50, "font_size": 100, "color": "#DC2626", "font_family": "cairo", "pattern": "diagonal", "page": 0, "excluded_pages": [1], "opacity": 0.2, "rotation": -45},
+        ]
+        save_res = self.client.put(
+            f"/api/internal/admin/materials/{mat_id}/layout",
+            headers=self.headers,
+            json={"layout_type": "default_text", "stamp_elements": text_layout},
+        )
+        self.assertEqual(save_res.status_code, 200, save_res.text)
+
+        # 2أ) ختم بنصوص قصيرة (<= 3 كلمات): مستر محمد الجويلي (بدون أ /) وبنفس الحجم الافتراضي
+        short_res = self.client.post(
+            "/api/internal/orders/direct-stamp-sync",
+            headers=self.headers,
+            json={
+                "material_id": mat_id,
+                "buyer_name_stamp": "مستر محمد الجويلي",
+                "buyer_phone_stamp": "01012345678",
+                "series_name": "البرهان",
+                "watermark_text": "التفوق",
+            },
+        )
+        self.assertEqual(short_res.status_code, 200, short_res.text)
+        short_pid = short_res.json()["purchase_id"]
+
+        # 2ب) ختم بنصوص طويلة (> 4 كلمات): تصغير ديناميكي في الاسم واسم المذكرة والغلاف والهاتف والعلامة المائية
+        long_res = self.client.post(
+            "/api/internal/orders/direct-stamp-sync",
+            headers=self.headers,
+            json={
+                "material_id": mat_id,
+                "buyer_name_stamp": "أستاذة سارة محمود عبد الرحمن الشافعي",
+                "buyer_phone_stamp": "01012345678",
+                "buyer_phone_stamp_2": "01122334455",
+                "series_name": "المراجعة النهائية الشاملة في الفيزياء الحديثة للثانوية",
+                "watermark_text": "نسخة المراجعة النهائية الشاملة للطلاب المتفوقين جدا",
+            },
+        )
+        self.assertEqual(long_res.status_code, 200, long_res.text)
+        long_pid = long_res.json()["purchase_id"]
+
+        db2 = self.TestingSession()
+        try:
+            short_p = db2.query(Purchase).filter(Purchase.id == short_pid).first()
+            long_p = db2.query(Purchase).filter(Purchase.id == long_pid).first()
+            self.assertTrue(short_p and os.path.isfile(short_p.output_pdf_path))
+            self.assertTrue(long_p and os.path.isfile(long_p.output_pdf_path))
+
+            def _span_sizes(pdf_file_path: str, page_idx: int) -> list[tuple[str, float, tuple]]:
+                out = []
+                with fitz.open(pdf_file_path) as d:
+                    for blk in d[page_idx].get_text("dict")["blocks"]:
+                        for ln in blk.get("lines", []):
+                            for sp in ln.get("spans", []):
+                                sp_txt = unicodedata.normalize("NFKC", str(sp.get("text") or ""))
+                                out.append((sp_txt, float(sp["size"]), sp.get("bbox", (0, 0, 0, 0))))
+                return out
+
+            short_p2_spans = _span_sizes(short_p.output_pdf_path, 1)
+            short_p2_text = "\n".join(t for t, _, _ in short_p2_spans)
+            self.assertIn("مستر", short_p2_text)
+            self.assertNotIn("أ / مستر", short_p2_text)
+            # الاسم القصير (3 كلمات) يظل على حجم 14pt
+            name_sizes_short = [sz for t, sz, _ in short_p2_spans if "الجويلي" in t or "مستر" in t]
+            self.assertTrue(any(abs(sz - 14.0) < 0.25 for sz in name_sizes_short), short_p2_spans)
+
+            # الغلاف القصير ("البرهان") يظل ~44pt
+            short_p1_spans = _span_sizes(short_p.output_pdf_path, 0)
+            self.assertTrue(any(sz >= 42.0 for t, sz, _ in short_p1_spans if "البرهان" in t or sz >= 42.0), short_p1_spans)
+
+            # النصوص الطويلة: تحافظ على (أستاذة) بدون (أ /) وتصغر ديناميكياً تحت 14pt في الداخل وتحت 44pt في الغلاف وتحت 100pt في العلامة المائية
+            long_p2_spans = _span_sizes(long_p.output_pdf_path, 1)
+            long_p2_text = "\n".join(t for t, _, _ in long_p2_spans)
+            self.assertIn("أستاذة", long_p2_text)
+            self.assertNotIn("أ / أستاذة", long_p2_text)
+
+            small_stamps = [sz for t, sz, _ in long_p2_spans if ("سارة" in t or "الفيزياء" in t or "الشافعي" in t)]
+            self.assertTrue(small_stamps and all(sz < 13.0 for sz in small_stamps), long_p2_spans)
+            wm_stamps = [sz for t, sz, _ in long_p2_spans if sz > 20.0]
+            self.assertTrue(wm_stamps and all(sz < 95.0 for sz in wm_stamps), long_p2_spans)
+
+            long_p1_spans = _span_sizes(long_p.output_pdf_path, 0)
+            cover_long = [(t, sz, bb) for t, sz, bb in long_p1_spans if sz > 18.0]
+            self.assertTrue(cover_long and all(sz < 40.0 for _, sz, _ in cover_long), long_p1_spans)
+            self.assertTrue(all(bb[2] <= 600.0 for _, _, bb in long_p1_spans), long_p1_spans)
+
+            # التحقق المباشر من التصغير الديناميكي في أختام الهاتف الطويلة أيضاً
+            c_font = _get_font("cairo")
+            self.assertEqual(
+                _compute_dynamic_font_size(c_font, "01012345678", "01012345678", 14.0, 595.0, 842.0, "phone", 25.0, "single"),
+                14.0,
+            )
+            self.assertLess(
+                _compute_dynamic_font_size(
+                    c_font,
+                    "01012345678 - 01122334455 - 01233445566",
+                    "01012345678 - 01122334455 - 01233445566",
+                    14.0,
+                    595.0,
+                    842.0,
+                    "phone",
+                    25.0,
+                    "single",
+                ),
+                13.0,
+            )
+
+            # 3) اختبار الإكسيل لكلمة (لوجو / صورة) + رفع لوجو + ختم علامة مائية بصورة
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.append(["اسم المدرس", "رقم الهاتف", "المذكرة", "اسم السلسلة", "العلامة المائية"])
+            ws.append(["مستر محمد الجويلي", "01012345678", "مذكرة المسميات والتصغير", "سلسلة التفوق", "لوجو"])
+            ws.append(["أستاذة سارة محمود", "01198765432", "مذكرة المسميات والتصغير", "", "صورة لوجو"])
+            ws.append(["د. خالد حسن", "01200001111", "مذكرة المسميات والتصغير", "", "نسخة خاصة"])
+            xls_buf = io.BytesIO()
+            wb.save(xls_buf)
+
+            self.assertTrue(is_logo_watermark_token("لوجو"))
+            self.assertTrue(is_logo_watermark_token("صورة"))
+            self.assertFalse(is_logo_watermark_token("نسخة خاصة"))
+
+            parsed = parse_excel_bytes(xls_buf.getvalue(), is_admin=True)
+            self.assertEqual(len(parsed), 3)
+            self.assertEqual(parsed[0].get("watermark_type"), "logo")
+            self.assertIsNone(parsed[0].get("watermark_text"))
+            self.assertEqual(parsed[1].get("watermark_type"), "logo")
+            self.assertIsNone(parsed[1].get("watermark_text"))
+            self.assertEqual(parsed[2].get("watermark_text"), "نسخة خاصة")
+            self.assertNotEqual(parsed[2].get("watermark_type"), "logo")
+
+            # إنشاء صورة لوجو بسيطة ورفعها عبر نقطة الرفع الجديدة
+            img = Image.new("RGB", (140, 140), (255, 255, 255))
+            for x in range(30, 110):
+                for y in range(30, 110):
+                    img.putpixel((x, y), (220, 38, 38))
+            logo_buf = io.BytesIO()
+            img.save(logo_buf, format="PNG")
+
+            up_logo = self.client.post(
+                "/api/internal/admin/logos/upload",
+                headers=self.headers,
+                files={"logo_image": ("teacher_logo.png", logo_buf.getvalue(), "image/png")},
+            )
+            self.assertEqual(up_logo.status_code, 200, up_logo.text)
+            wm_logo_path = up_logo.json()["watermark_logo_path"]
+            self.assertTrue(wm_logo_path.startswith("/storage/logos/"))
+
+            logo_stamp_res = self.client.post(
+                "/api/internal/orders/direct-stamp-sync",
+                headers=self.headers,
+                json={
+                    "material_id": mat_id,
+                    "buyer_name_stamp": parsed[0]["teacher_name"],
+                    "buyer_phone_stamp": parsed[0]["phone"],
+                    "series_name": parsed[0]["series_name"],
+                    "watermark_type": "logo",
+                    "watermark_logo_path": wm_logo_path,
+                },
+            )
+            self.assertEqual(logo_stamp_res.status_code, 200, logo_stamp_res.text)
+            logo_pid = logo_stamp_res.json()["purchase_id"]
+            logo_p = db2.query(Purchase).filter(Purchase.id == logo_pid).first()
+            self.assertEqual(logo_p.watermark_logo_path, wm_logo_path)
+            with fitz.open(logo_p.output_pdf_path) as ld:
+                total_imgs = sum(len(p.get_images()) for p in ld)
+                self.assertGreater(total_imgs, 0, "Expected uploaded logo image XObject in stamped PDF")
+                full_txt = unicodedata.normalize("NFKC", "\n".join(p.get_text("text") for p in ld))
+                self.assertNotIn("لوجو", full_txt)
+        finally:
+            db2.close()
+
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

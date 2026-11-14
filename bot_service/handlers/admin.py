@@ -467,7 +467,7 @@ async def skip_vip_series(callback: CallbackQuery, state: FSMContext):
     await state.update_data(vip_series=None)
     await state.set_state(AdminVIPStates.waiting_watermark)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⏭️ بدون علامة مائية", callback_data="vip_skip:watermark")]])
-    await callback.message.answer("🛡️ <b>أدخل نص العلامة المائية (اختياري):</b>", reply_markup=kb, parse_mode="HTML")
+    await callback.message.answer("🛡️ <b>أدخل نص العلامة المائية أو أرسل صورة لوجو مباشرة (اختياري):</b>", reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 
@@ -478,7 +478,7 @@ async def process_vip_series(message: Message, state: FSMContext):
     await state.update_data(vip_series=series)
     await state.set_state(AdminVIPStates.waiting_watermark)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⏭️ بدون علامة مائية", callback_data="vip_skip:watermark")]])
-    await message.answer("🛡️ <b>أدخل نص العلامة المائية (اختياري):</b>", reply_markup=kb, parse_mode="HTML")
+    await message.answer("🛡️ <b>أدخل نص العلامة المائية أو أرسل صورة لوجو مباشرة (اختياري):</b>", reply_markup=kb, parse_mode="HTML")
 
 
 async def _execute_vip_direct_stamp(target_msg: Message, state: FSMContext, user_id: int):
@@ -491,6 +491,8 @@ async def _execute_vip_direct_stamp(target_msg: Message, state: FSMContext, user
     phone_2 = data.get("vip_phone_2")
     series = data.get("vip_series")
     wm_text = data.get("vip_watermark")
+    wm_logo = data.get("vip_watermark_logo_path")
+    wm_type = "logo" if wm_logo else ("text" if wm_text else "none")
 
     status_msg = await target_msg.answer("⏳ جاري الختم المتجه الخفيف وتجهيز النسخة لك...")
     res = await bridge_client.direct_stamp_sync({
@@ -500,8 +502,9 @@ async def _execute_vip_direct_stamp(target_msg: Message, state: FSMContext, user
         "buyer_phone_stamp_2": phone_2,
         "series_name": series,
         "doc_name_stamp": series,
-        "watermark_text": wm_text,
-        "watermark_type": "text" if wm_text else "none",
+        "watermark_text": None if wm_logo else wm_text,
+        "watermark_type": wm_type,
+        "watermark_logo_path": wm_logo,
         "telegram_chat_id": str(target_msg.chat.id),
         "telegram_user_id": str(user_id),
         "is_admin": True,
@@ -539,16 +542,43 @@ async def _execute_vip_direct_stamp(target_msg: Message, state: FSMContext, user
 
 @router.callback_query(F.data == "vip_skip:watermark", AdminVIPStates.waiting_watermark)
 async def skip_vip_watermark(callback: CallbackQuery, state: FSMContext):
-    await state.update_data(vip_watermark=None)
+    await state.update_data(vip_watermark=None, vip_watermark_logo_path=None)
     await callback.answer("جاري التجهيز...")
     await _execute_vip_direct_stamp(callback.message, state, callback.from_user.id)
 
 
 @router.message(AdminVIPStates.waiting_watermark)
 async def process_vip_watermark(message: Message, state: FSMContext):
+    from services.batch_parser import is_logo_watermark_token
+
+    if message.photo or (
+        message.document
+        and (
+            (message.document.mime_type or "").startswith("image/")
+            or (message.document.file_name or "").lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
+        )
+    ):
+        file_id = message.photo[-1].file_id if message.photo else message.document.file_id
+        fname = (message.document.file_name if message.document else None) or "vip_logo.png"
+        tg_file = await message.bot.get_file(file_id)
+        buf = await message.bot.download_file(tg_file.file_path)
+        logo_bytes = buf.read()
+        logo_path = await bridge_client.upload_watermark_logo(logo_bytes, fname)
+        if not logo_path:
+            await message.answer("⚠️ تعذر معالجة صورة اللوجو. حاول إرسال صورة أخرى أو اكتب نص العلامة المائية.")
+            return
+        await state.update_data(vip_watermark=None, vip_watermark_logo_path=logo_path)
+        await _execute_vip_direct_stamp(message, state, message.from_user.id)
+        return
+
     raw = (message.text or "").strip()
+    if raw and is_logo_watermark_token(raw):
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⏭️ تخطي العلامة المائية", callback_data="vip_skip:watermark")]])
+        await message.answer("🖼️ <b>ابعت صورة اللوجو الآن</b> ليتم وضعها كعلامة مائية في المذكرة:", reply_markup=kb, parse_mode="HTML")
+        return
+
     wm = None if raw in ("تخطي", "تخطي ⏩", "-", "بدون", "") else raw
-    await state.update_data(vip_watermark=wm)
+    await state.update_data(vip_watermark=wm, vip_watermark_logo_path=None)
     await _execute_vip_direct_stamp(message, state, message.from_user.id)
 
 

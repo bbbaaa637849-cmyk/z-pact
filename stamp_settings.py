@@ -62,6 +62,7 @@ BOOKLET_OR_SERIES_FIELD_KEYS: Tuple[str, ...] = (
 
 WATERMARK_FIELD_KEYS: Tuple[str, ...] = (
     "watermark_text",
+    "watermark_logo_path",
 )
 
 ALL_STAMP_FIELD_KEYS: Tuple[str, ...] = (
@@ -252,6 +253,7 @@ def validate_stamp_fields(
     booklet_title: Any = None,
     material_ref: Any = None,
     watermark_text: Any = None,
+    watermark_logo_path: Any = None,
     is_admin: bool = False,
     include_watermark: Optional[bool] = None,
 ) -> Tuple[bool, Optional[str]]:
@@ -270,6 +272,7 @@ def validate_stamp_fields(
             "booklet_title": booklet_title,
             "material_ref": material_ref,
             "watermark_text": watermark_text,
+            "watermark_logo_path": watermark_logo_path,
         },
         is_admin=is_admin,
         include_watermark=include_watermark,

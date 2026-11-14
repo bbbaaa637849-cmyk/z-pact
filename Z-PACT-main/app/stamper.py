@@ -246,6 +246,80 @@ def process_frame_image_to_transparent_png(
     return out_path
 
 
+def process_logo_image_to_transparent_png(
+    image_bytes: bytes,
+    out_path: Optional[str] = None,
+    white_threshold: int = 232,
+    max_dim: int = 1400,
+) -> bytes:
+    """
+    معالجة صورة شعار (لوجو) العلامة المائية:
+    - الحفاظ التام على الشفافية إذا كانت الصورة PNG شفافة أصلاً.
+    - إزالة الخلفية البيضاء تلقائياً إذا كانت الصورة بخلفية بيضاء مصمتة (مثل صور JPG القادمة من تيليجرام).
+    """
+    from PIL import Image, ImageChops
+
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+    w, h = img.size
+    if max(w, h) > max_dim and max_dim > 0:
+        scale = max_dim / float(max(w, h))
+        img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
+        w, h = img.size
+
+    r, g, b, a = img.split()
+    a_extrema = a.getextrema()
+    has_existing_alpha = bool(a_extrema and a_extrema[0] < 245)
+
+    if not has_existing_alpha and w >= 4 and h >= 4:
+        corners = [
+            img.getpixel((0, 0))[:3],
+            img.getpixel((w - 1, 0))[:3],
+            img.getpixel((0, h - 1))[:3],
+            img.getpixel((w - 1, h - 1))[:3],
+        ]
+        white_corners = sum(1 for (cr, cg, cb) in corners if min(cr, cg, cb) >= white_threshold)
+        if white_corners >= 3:
+            min_rgb = ImageChops.darker(ImageChops.darker(r, g), b)
+            soft_band = max(white_threshold - 22, 180)
+            lut = [
+                0 if v >= white_threshold else (int((white_threshold - v) * 255 / (white_threshold - soft_band)) if v > soft_band else 255)
+                for v in range(256)
+            ]
+            img = Image.merge("RGBA", (r, g, b, ImageChops.darker(a, min_rgb.point(lut))))
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    png_bytes = buf.getvalue()
+    if out_path:
+        os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+        with open(out_path, "wb") as f:
+            f.write(png_bytes)
+    return png_bytes
+
+
+def _prepare_logo_overlay_png_bytes(logo_path: str, opacity: float) -> Optional[bytes]:
+    """تحضير بايتات صورة اللوجو بالشفافية المطلوبة مرة واحدة لإعادة استخدامها عبر كل الصفحات بسرعة."""
+    if not logo_path or not os.path.exists(logo_path):
+        return None
+    try:
+        from PIL import Image
+        with Image.open(logo_path) as raw_img:
+            pil_img = raw_img.convert("RGBA")
+            w, h = pil_img.size
+            if max(w, h) > 1200:
+                sc = 1200.0 / float(max(w, h))
+                pil_img = pil_img.resize((max(1, int(w * sc)), max(1, int(h * sc))), Image.LANCZOS)
+            r, g, b, a = pil_img.split()
+            op = max(0.02, min(1.0, float(opacity)))
+            a = a.point(lambda x: int(x * op))
+            out_img = Image.merge("RGBA", (r, g, b, a))
+            buf = io.BytesIO()
+            out_img.save(buf, format="PNG", optimize=True)
+            return buf.getvalue()
+    except Exception:
+        return None
+
+
 def _strip_pdf_structural_bloat(doc: fitz.Document) -> None:
     """
     حذف الهياكل غير المرئية الثقيلة (مثل أشجار Accessibility الضخمة والملفات XML المرفقة لمعادلات Word)
@@ -727,8 +801,10 @@ def render_stamped_page_preview_png_sync(
 
         if apply_stamps:
             resolved_frame = _ensure_transparent_frame_cached(_resolve_asset_path(page_frame_path, "frames"))
-            resolved_logo = _resolve_asset_path(watermark_logo_path, "logos") or os.path.abspath(
-                os.path.join(settings.BASE_DIR, "frontend", "assets", "logo.png")
+            resolved_logo = (
+                _resolve_asset_path(watermark_logo_path, "logos")
+                or _resolve_asset_path(watermark_logo_path, "watermarks")
+                or os.path.abspath(os.path.join(settings.BASE_DIR, "frontend", "assets", "logo.png"))
             )
             effective_layout = stamp_layout if stamp_layout else get_default_stamp_elements()
             _apply_stamps_to_page(
@@ -745,6 +821,7 @@ def render_stamped_page_preview_png_sync(
                 logo_path=resolved_logo,
                 material_tag=material_tag,
                 page_frame_path=resolved_frame,
+                logo_bytes_cache={},
             )
 
         pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
@@ -798,6 +875,7 @@ def _apply_stamps_to_page(
     logo_path: Optional[str] = None,
     material_tag: Optional[str] = None,
     page_frame_path: Optional[str] = None,
+    logo_bytes_cache: Optional[dict] = None,
 ) -> None:
     """تطبيق الإطار واللوجو والأختام النصية على صفحة واحدة (مشتركة بين الختم الكامل والمعاينة)."""
     # عزل حالة الرسم الأصلية للصفحة (ExtGState/CTM/Clip) قبل إضافة الأختام الفوقية حتى لا تتأثر شفافيتها أو لونها
@@ -815,8 +893,9 @@ def _apply_stamps_to_page(
     smart_doc_name  = doc_name_stamp.strip() if doc_name_stamp else ""
     smart_wm_text   = watermark_text.strip() if watermark_text else ""
     clean_wm_type   = (watermark_type or "none").strip().lower()
+    is_logo_wm = clean_wm_type in ("logo", "teacher", "platform", "image")
 
-    if clean_wm_type in ("none", "off", "no_watermark", "false", "logo"):
+    if clean_wm_type in ("none", "off", "no_watermark", "false") or is_logo_wm:
         smart_wm_text = ""
 
     # === Layer 0: إطار الصفحة (شفاف الوسط) ===
@@ -827,12 +906,12 @@ def _apply_stamps_to_page(
             logger.error(f"❌ [Frame Error] Page {page_num}: {e}")
 
     # === Layer 1: اللوجو المائي ===
-    if clean_wm_type == "logo" and logo_path and os.path.exists(logo_path):
+    if is_logo_wm and logo_path and os.path.exists(logo_path):
         logo_elements = [el for el in stamp_layout if el.get("type") == "logo_watermark"]
         if not logo_elements:
-            logo_elements = [{"type": "logo_watermark", "x_pct": 50.0, "y_pct": 50.0, "scale": 220, "opacity": 0.14, "page": 0}]
+            logo_elements = [{"type": "logo_watermark", "x_pct": 50.0, "y_pct": 50.0, "scale": 220, "opacity": 0.15, "page": 0}]
         for el in logo_elements:
-            _draw_logo_on_page(page, el, page_num, logo_path)
+            _draw_logo_on_page(page, el, page_num, logo_path, logo_bytes_cache=logo_bytes_cache)
 
     # === Layer 2: الأختام النصية والعلامة المائية ===
     page_stamps = _get_stamps_for_page(stamp_layout, page_num, total_pages)
@@ -867,7 +946,7 @@ def _apply_stamps_to_page(
             else:
                 display_text = _get_smart_text(smart_doc_name, "سلسلة", material_tag)
         elif stamp_type == "watermark":
-            if clean_wm_type in ("none", "logo", "off", "no_watermark", "false", ""):
+            if clean_wm_type in ("none", "off", "no_watermark", "false", "") or is_logo_wm:
                 display_text = ""
             elif is_literal:
                 display_text = smart_wm_text
@@ -919,12 +998,13 @@ def _stamp_native(
 
         # --- تجهيز اللوجو ---
         logo_path = None
-        if clean_wm_type == "logo":
-            logo_path = _resolve_asset_path(watermark_logo_path, "logos")
+        if clean_wm_type in ("logo", "teacher", "platform", "image"):
+            logo_path = _resolve_asset_path(watermark_logo_path, "logos") or _resolve_asset_path(watermark_logo_path, "watermarks")
             if not logo_path:
                 logo_path = os.path.abspath(os.path.join(settings.BASE_DIR, "frontend", "assets", "logo.png"))
 
         effective_layout = stamp_layout if stamp_layout else get_default_stamp_elements()
+        logo_bytes_cache: dict = {}
 
         # --- معالجة كل صفحة ---
         for i in range(total_pages):
@@ -942,6 +1022,7 @@ def _stamp_native(
                 logo_path=logo_path,
                 material_tag=material_tag,
                 page_frame_path=resolved_frame,
+                logo_bytes_cache=logo_bytes_cache,
             )
 
         if finalize_to_path:
@@ -998,8 +1079,8 @@ def _get_stamps_for_page(stamp_layout: list[dict], page_num: int, total_pages: i
     return result
 
 
-def _draw_logo_on_page(page, el: dict, page_num: int, logo_path: str):
-    """رسم اللوجو المائي على صفحة PyMuPDF."""
+def _draw_logo_on_page(page, el: dict, page_num: int, logo_path: str, logo_bytes_cache: Optional[dict] = None):
+    """رسم اللوجو المائي على صفحة PyMuPDF مع الحفاظ على التمركز والشفافية."""
     try:
         target_page = int(el.get("page", 0))
     except (TypeError, ValueError):
@@ -1017,35 +1098,34 @@ def _draw_logo_on_page(page, el: dict, page_num: int, logo_path: str):
     if not logo_path or not os.path.exists(logo_path):
         return
 
-    scale = el.get("font_size", 10.0) * 10.0
-    if scale <= 0:
-        scale = 150.0
-
     w = page.rect.width
     h = page.rect.height
-    cx = (el.get("x_pct", 50.0) / 100.0) * w
-    cy = (el.get("y_pct", 50.0) / 100.0) * h
-    rect = fitz.Rect(cx - scale/2, cy - scale/2, cx + scale/2, cy + scale/2)
+    if el.get("font_size"):
+        scale = float(el["font_size"]) * 10.0
+    elif el.get("scale"):
+        scale = float(el["scale"])
+    else:
+        scale = 220.0
+    if scale <= 0:
+        scale = 220.0
+    scale = min(max(scale, 40.0), min(w, h) * 0.85)
+
+    cx = (float(el.get("x_pct", 50.0)) / 100.0) * w
+    cy = (float(el.get("y_pct", 50.0)) / 100.0) * h
+    rect = fitz.Rect(cx - scale / 2, cy - scale / 2, cx + scale / 2, cy + scale / 2)
 
     op = float(el.get("opacity", 0.15))
-    # يتم رسم شعار العلامة المائية فوق المحتوى (under_content = False) لضمان ظهوره
-    under_content = False
+    cache_key = (logo_path, round(op, 3))
+    cached_bytes = logo_bytes_cache.get(cache_key) if logo_bytes_cache is not None else None
+    if cached_bytes is None:
+        cached_bytes = _prepare_logo_overlay_png_bytes(logo_path, op)
+        if cached_bytes and logo_bytes_cache is not None:
+            logo_bytes_cache[cache_key] = cached_bytes
 
-    try:
-        from PIL import Image
-        import io
-
-        pil_img = Image.open(logo_path).convert("RGBA")
-        r, g, b, a = pil_img.split()
-        a = a.point(lambda x: int(x * op))
-        pil_img = Image.merge("RGBA", (r, g, b, a))
-
-        buf = io.BytesIO()
-        pil_img.save(buf, format="PNG")
-        buf.seek(0)
-        page.insert_image(rect, stream=buf.read(), keep_proportion=True, overlay=not under_content)
-    except Exception:
-        page.insert_image(rect, filename=logo_path, keep_proportion=True, overlay=not under_content)
+    if cached_bytes:
+        page.insert_image(rect, stream=cached_bytes, keep_proportion=True, overlay=True)
+    else:
+        page.insert_image(rect, filename=logo_path, keep_proportion=True, overlay=True)
 
 
 # خريطة الحروف العربية المعزولة (Presentation Forms-B) إلى حروفها الأساسية للخطوط التي تفتقدها مثل Cairo
@@ -1078,8 +1158,94 @@ def _normalize_font_glyphs(text: str, font: fitz.Font) -> str:
     return "".join(chars)
 
 
+_CONNECTOR_WORDS = {"في", "من", "على", "عن", "إلى", "الى", "مع", "و", "in", "of", "for", "and", "to", "by"}
+
+
+def _count_meaningful_words(orig_text: str) -> int:
+    """عد الكلمات الفعلية مع تجاهل علامات الفصل وحروف الجر القصيرة مثل (في) حتى لا ينكمش قالب 'سلسلة X في Y'، بينما تنكمش الأسماء والعبارات من 4+ كلمات."""
+    all_tokens = []
+    for tok in (orig_text or "").split():
+        stripped = tok.strip("/\\|-–—:.,،؛()[]{}«»\"' ")
+        if stripped and any(ch.isalnum() for ch in stripped):
+            all_tokens.append(stripped)
+    content_tokens = [t for t in all_tokens if t.lower() not in _CONNECTOR_WORDS]
+    return len(content_tokens) if content_tokens else len(all_tokens)
+
+
+def _compute_dynamic_font_size(
+    font: fitz.Font,
+    shaped_text: str,
+    orig_text: str,
+    base_fsize: float,
+    pw: float,
+    ph: float,
+    stamp_type: str,
+    x_pct: float,
+    pattern: str,
+) -> float:
+    """تصغير حجم الخط ديناميكياً إذا زاد النص عن ~3 كلمات أو امتد عرض النص عن 12 em أو تجاوز حدود الصفحة في جميع أنواع الأختام."""
+    if pattern == "diagonal" and stamp_type == "watermark":
+        eff_base = min(float(base_fsize), 100.0)
+    elif pattern == "tiled" and stamp_type == "watermark":
+        eff_base = min(float(base_fsize), 60.0)
+    elif stamp_type == "watermark":
+        eff_base = min(float(base_fsize), 120.0)
+    else:
+        eff_base = float(base_fsize)
+
+    if eff_base <= 0 or not shaped_text:
+        return eff_base
+
+    word_count = _count_meaningful_words(orig_text)
+    try:
+        em_width = float(font.text_length(shaped_text, fontsize=1.0))
+    except Exception:
+        em_width = float(len(orig_text or shaped_text)) * 0.55
+
+    # حتى 3 كلمات فعلية وعرض 12.0 em: يبقى الحجم الافتراضي كما هو تماماً
+    phrase_scale = 1.0
+    if word_count > 3:
+        phrase_scale = min(phrase_scale, (3.0 / float(word_count)) ** 0.62)
+    if em_width > 12.0:
+        phrase_scale = min(phrase_scale, (12.0 / em_width) ** 0.70)
+
+    if pattern in ("diagonal", "tiled") and eff_base >= 30.0:
+        min_floor = min(eff_base, max(12.0, eff_base * 0.25))
+    else:
+        min_floor = min(eff_base, max(5.5, eff_base * 0.38))
+
+    target_fsize = max(min_floor, eff_base * phrase_scale)
+
+    # ضبط هندسي لمنع خروج النص الطويل عن عرض الصفحة أو القطر
+    if em_width > 0.0 and pw > 0.0 and ph > 0.0:
+        if pattern == "diagonal" and stamp_type == "watermark":
+            max_box_w = math.hypot(pw, ph) * 0.72
+            fit_floor = min(target_fsize, max(10.0, eff_base * 0.18))
+        elif pattern == "tiled" and stamp_type == "watermark":
+            max_box_w = pw * 0.48
+            fit_floor = min(target_fsize, max(8.0, eff_base * 0.22))
+        elif 12.0 <= x_pct <= 88.0:
+            cx = (x_pct / 100.0) * pw
+            margin_x = max(12.0, pw * 0.02)
+            half_left = max(16.0, cx - margin_x)
+            half_right = max(16.0, (pw - margin_x) - cx)
+            max_box_w = min(pw * 0.88, 2.0 * min(half_left, half_right))
+            fit_floor = min(target_fsize, max(4.5, min_floor * 0.75))
+        else:
+            # الإحداثيات الطرفية القصوى: نكتفي بسقف عرض الصفحة الكلي حتى لا تتشوه النصوص القصيرة على الحافة
+            max_box_w = pw * 0.88
+            fit_floor = min(target_fsize, max(4.5, min_floor * 0.75))
+
+        if em_width * target_fsize > max_box_w:
+            target_fsize = max(fit_floor, max_box_w / em_width)
+
+    return round(float(target_fsize), 2)
+
+
 def _draw_text_stamp_on_page(page, stamp: dict, text: str, pw: float, ph: float, font_name: str):
-    """رسم ختم نصي على صفحة PyMuPDF بدقة عالية."""
+    """رسم ختم نصي على صفحة PyMuPDF بدقة عالية مع تصغير ديناميكي تلقائي للنصوص الطويلة."""
+    orig_text = (text or "").strip()
+
     # تشكيل وإعادة توجيه النصوص العربية لتعرض بشكل صحيح (متصلة ومن اليمين إلى اليسار مع دعم الروابط الحرفية)
     if text:
         has_arabic = any('\u0600' <= char <= '\u06FF' or '\u0750' <= char <= '\u077F' or '\u08A0' <= char <= '\u08FF' or '\uFB50' <= char <= '\uFDFF' or '\uFE70' <= char <= '\uFEFF' for char in text)
@@ -1101,7 +1267,7 @@ def _draw_text_stamp_on_page(page, stamp: dict, text: str, pw: float, ph: float,
 
     x_pct   = float(stamp.get("x_pct", 50))
     y_pct   = float(stamp.get("y_pct", 50))
-    fsize   = float(stamp.get("font_size", 14))
+    base_fsize = float(stamp.get("font_size", 14))
     rotation = float(stamp.get("rotation", 0))
     opacity  = float(stamp.get("opacity", 1.0))
     color_hex = stamp.get("color", "#000000")
@@ -1116,6 +1282,21 @@ def _draw_text_stamp_on_page(page, stamp: dict, text: str, pw: float, ph: float,
     # تحديد Z-index: نبقي الطبقة فوقية مع الشفافية حتى لا تختفي العلامة خلف خلفيات الصفحات البيضاء
     overlay_val = True
 
+    font = _get_font(font_family)
+    fallback_fontfile = _get_font_path(font_family) or _CAIRO_FONT_PATH
+    text = _normalize_font_glyphs(text, font)
+    fsize = _compute_dynamic_font_size(
+        font=font,
+        shaped_text=text,
+        orig_text=orig_text,
+        base_fsize=base_fsize,
+        pw=pw,
+        ph=ph,
+        stamp_type=stamp_type,
+        x_pct=x_pct,
+        pattern=pattern,
+    )
+
     # --- نمط Tiled (علامة مائية مكررة) ---
     if pattern == "tiled" and stamp_type == "watermark":
         _draw_tiled_watermark(page, text, fsize, color, opacity, overlay_val, font_family=font_family)
@@ -1123,22 +1304,15 @@ def _draw_text_stamp_on_page(page, stamp: dict, text: str, pw: float, ph: float,
 
     # --- نمط Diagonal (علامة مائية قطرية) ---
     if pattern == "diagonal" and stamp_type == "watermark":
-        fsize = min(fsize, 100)
         _draw_diagonal_watermark(page, text, fsize, color, opacity, overlay_val, font_family=font_family)
         return
 
     # --- نمط Standard (ختم عادي) ---
-    if stamp_type == "watermark":
-        fsize = min(fsize, 120)
-
     cx = (x_pct / 100.0) * pw
     cy = (y_pct / 100.0) * ph
 
     # إنشاء TextWriter لدعم النص العربي بالخط المختار
     tw = fitz.TextWriter(page.rect)
-    font = _get_font(font_family)
-    fallback_fontfile = _get_font_path(font_family) or _CAIRO_FONT_PATH
-    text = _normalize_font_glyphs(text, font)
     # تطبيق التثخين المتجهي (render_mode=2 Fill+Stroke) إذا طُلب بولد والخط المحمّل غير بولد أصلاً (مثل Cairo Variable Regular)
     render_mode = 2 if (wants_bold and not font.flags.get("bold")) else 0
 

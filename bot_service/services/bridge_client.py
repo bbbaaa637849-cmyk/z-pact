@@ -539,6 +539,25 @@ class BridgeClient:
                 logger.error(f"❌ [Bridge Exception] get_preview_page_png: {e}")
                 return None
 
+    async def upload_watermark_logo(
+        self,
+        logo_bytes: bytes,
+        filename: str = "logo.png",
+    ) -> Optional[str]:
+        url = f"{self.base_url}/internal/admin/logos/upload"
+        headers = {"X-Internal-Service-Key": bot_config.INTERNAL_SERVICE_KEY}
+        files = {"logo_image": (filename or "logo.png", logo_bytes, "image/png")}
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                res = await client.post(url, headers=headers, files=files)
+                if res.status_code == 200:
+                    data = res.json()
+                    return data.get("watermark_logo_path")
+                return None
+            except Exception as e:
+                logger.error(f"❌ [Bridge Exception] upload_watermark_logo: {e}")
+                return None
+
     async def direct_stamp_sync(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         url = f"{self.base_url}/internal/orders/direct-stamp-sync"
         async with httpx.AsyncClient(timeout=180.0) as client:

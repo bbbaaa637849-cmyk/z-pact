@@ -69,6 +69,7 @@ class AdminBatchStampStates(StatesGroup):
     reviewing_batch = State()
     waiting_batch_frame = State()
     waiting_batch_text = State()
+    waiting_batch_logo = State()
 
 class AdminBroadcastStates(StatesGroup):
     """حالات الإذاعة العامة لجميع المدرسين"""

@@ -285,6 +285,12 @@ def _render_batch_summary_text_and_kb(state_data: Dict[str, Any]) -> tuple[str, 
 
     runnable = 0
     missing_mat = 0
+    pending_logos = [
+        e for e in entries
+        if str(e.get("watermark_type") or "").lower() == "logo" and not e.get("watermark_logo_path")
+    ]
+    ready_logos = [e for e in entries if e.get("watermark_logo_path")]
+
     lines = [
         f"📋 <b>مراجعة الدفعة المستخرجة ({html.escape(str(source))})</b>",
         "━━━━━━━━━━━━━━━━━━",
@@ -293,16 +299,25 @@ def _render_batch_summary_text_and_kb(state_data: Dict[str, Any]) -> tuple[str, 
         name = html.escape(str(e.get("teacher_name") or "بدون اسم"))
         phone = html.escape(str(e.get("phone") or "بدون رقم"))
         series_lbl = f" | 📚 {html.escape(str(e.get('series_name')))}" if e.get("series_name") else ""
+        if e.get("watermark_logo_path"):
+            wm_lbl = " | 🖼️ لوجو ✅"
+        elif str(e.get("watermark_type") or "").lower() == "logo":
+            wm_lbl = " | 🖼️ مطلوب لوجو ⏳"
+        elif e.get("watermark_text"):
+            wm_lbl = f" | 💧 {html.escape(str(e.get('watermark_text')))}"
+        else:
+            wm_lbl = ""
+
         if e.get("matched_material_id"):
             runnable += 1
-            lines.append(f"🟢 #{e['idx']} {name} (<code>{phone}</code>){series_lbl} ⬅️ <i>{html.escape(e['matched_material_title'])}</i>")
+            lines.append(f"🟢 #{e['idx']} {name} (<code>{phone}</code>){series_lbl}{wm_lbl} ⬅️ <i>{html.escape(e['matched_material_title'])}</i>")
         elif def_id:
             runnable += 1
-            lines.append(f"🟡 #{e['idx']} {name} (<code>{phone}</code>){series_lbl} ⬅️ <i>{html.escape(str(def_title))} (افتراضي)</i>")
+            lines.append(f"🟡 #{e['idx']} {name} (<code>{phone}</code>){series_lbl}{wm_lbl} ⬅️ <i>{html.escape(str(def_title))} (افتراضي)</i>")
         else:
             missing_mat += 1
             ref = html.escape(str(e.get("material_ref") or "غير محددة"))
-            lines.append(f"⚠️ #{e['idx']} {name} (<code>{phone}</code>){series_lbl} — اختر مذكرة افتراضية: <code>{ref}</code>")
+            lines.append(f"⚠️ #{e['idx']} {name} (<code>{phone}</code>){series_lbl}{wm_lbl} — اختر مذكرة افتراضية: <code>{ref}</code>")
 
     # حساب البقية بعد 15
     for e in entries[15:]:
@@ -319,6 +334,23 @@ def _render_batch_summary_text_and_kb(state_data: Dict[str, Any]) -> tuple[str, 
         f"📊 <b>الملخص:</b> جاهز للتنفيذ: <code>{runnable}</code> | يحتاج مذكرة افتراضية: <code>{missing_mat}</code>",
         f"🔤 <b>الخط الموحد:</b> <code>{font_fam or 'خط كل مذكرة المحفوظ'}</code>",
         f"🖼️ <b>إطار مخصص للدفعة:</b> <code>{'مُرفق ✅' if frame_path else 'إطار كل مذكرة الافتراضي'}</code>",
+    ])
+
+    if ready_logos:
+        lines.append(f"🖼️ <b>صور لوجو جاهزة:</b> <code>{len(ready_logos)}</code> مدرس")
+
+    if pending_logos:
+        lines.append(
+            f"\n🖼️ <b>مطلوب صور اللوجو:</b> يوجد <code>{len(pending_logos)}</code> مدرس في الملف يريدون علامة مائية بصورة لوجو — "
+            "اضغط <b>🖼️ إرسال صور اللوجو المطلوبة</b> بالأسفل لإرسال صورهم:"
+        )
+    else:
+        lines.append(
+            "\n🖼️ <b>هل يوجد مدرس عنده صورة لوجو؟</b> لو في حد من المدرسين عاوز علامة مائية بصورة لوجو، "
+            "اضغط <b>🖼️ إرفاق لوجو لمدرس</b> وابعت الصورة وهنربطها بيه فوراً."
+        )
+
+    lines.extend([
         "",
         "💡 اضغط <b>ابدأ الختم المتسلسل</b> ليتم ختم وإرسال المذكرات واحدة تلو الأخرى بأمان على المعالج:",
     ])
@@ -329,6 +361,14 @@ def _render_batch_summary_text_and_kb(state_data: Dict[str, Any]) -> tuple[str, 
             text=f"🚀 ابدأ الختم المتسلسل الآن ({runnable} ملف)",
             callback_data="adm_batch:run",
         )])
+    if pending_logos:
+        kb_rows.append([InlineKeyboardButton(
+            text=f"🖼️ إرسال صور اللوجو المطلوبة ({len(pending_logos)})",
+            callback_data="adm_batch:collect_logos",
+        )])
+    kb_rows.append([
+        InlineKeyboardButton(text="🖼️ إرفاق لوجو لمدرس / للدفعة", callback_data="adm_batch:pick_logo_teacher"),
+    ])
     kb_rows.append([
         InlineKeyboardButton(text="📚 تعيين مذكرة افتراضية", callback_data="adm_batch:pick_default_mat"),
         InlineKeyboardButton(text="🔤 تغيير الخط للدفعة", callback_data="adm_batch:pick_font"),
@@ -470,6 +510,193 @@ async def handle_batch_attach_frame_start(callback: CallbackQuery, state: FSMCon
     await callback.answer()
 
 
+def _batch_entry_label(entry: Dict[str, Any]) -> str:
+    return str(
+        entry.get("teacher_name")
+        or entry.get("series_name")
+        or entry.get("phone")
+        or f"مدرس #{entry.get('idx')}"
+    )
+
+
+def _find_next_pending_logo_entry(entries: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    for e in entries:
+        if (
+            str(e.get("watermark_type") or "").lower() == "logo"
+            and not e.get("watermark_logo_path")
+            and not e.get("_logo_skipped")
+        ):
+            return e
+    return None
+
+
+async def _prompt_next_batch_logo_or_summary(target_msg: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    entries = data.get("batch_entries", [])
+    if data.get("batch_logo_target") == "queue":
+        nxt = _find_next_pending_logo_entry(entries)
+        if nxt:
+            await state.set_state(AdminBatchStampStates.waiting_batch_logo)
+            await state.update_data(batch_logo_active_idx=nxt["idx"])
+            lbl = html.escape(_batch_entry_label(nxt))
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⏭️ تخطي هذا المدرس", callback_data="adm_batch_logo:skip")],
+                [InlineKeyboardButton(text="⬅️ رجوع لمراجعة الدفعة", callback_data="adm_batch_logo:back")],
+            ])
+            await target_msg.answer(
+                f"🖼️ <b>ابعت صورة اللوجو للمدرس #{nxt['idx']}: {lbl}</b>\n"
+                f"<i>(أرسلها كصورة Photo أو ملف PNG/JPG وسيتم تفريغ خلفيتها ووضعها علامة مائية له)</i>",
+                reply_markup=kb,
+                parse_mode="HTML",
+            )
+            return
+
+    await state.set_state(AdminBatchStampStates.reviewing_batch)
+    await state.update_data(batch_logo_target=None, batch_logo_active_idx=None)
+    await _send_batch_summary_card(target_msg, await state.get_data())
+
+
+@router.callback_query(F.data == "adm_batch:collect_logos", AdminBatchStampStates.reviewing_batch)
+async def handle_batch_collect_logos_start(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    entries = [dict(e) for e in data.get("batch_entries", [])]
+    for e in entries:
+        e.pop("_logo_skipped", None)
+    await state.update_data(batch_entries=entries, batch_logo_target="queue")
+    await callback.answer()
+    await _prompt_next_batch_logo_or_summary(callback.message, state)
+
+
+@router.callback_query(F.data == "adm_batch:pick_logo_teacher", AdminBatchStampStates.reviewing_batch)
+async def handle_batch_pick_logo_teacher(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    entries = data.get("batch_entries", [])
+    rows = [[InlineKeyboardButton(text="🖼️ تطبيق لوجو واحد على كل المدرسين", callback_data="adm_batch_setlogo_tgt:all")]]
+    for e in entries[:25]:
+        mark = "🖼️ ✅" if e.get("watermark_logo_path") else ("🖼️ ⏳" if str(e.get("watermark_type") or "").lower() == "logo" else "📝")
+        lbl = _batch_entry_label(e)[:28]
+        rows.append([InlineKeyboardButton(
+            text=f"{mark} #{e['idx']} — {lbl}",
+            callback_data=f"adm_batch_setlogo_tgt:{e['idx']}",
+        )])
+    rows.append([InlineKeyboardButton(text="⬅️ رجوع لمراجعة الدفعة", callback_data="adm_batch_logo:back")])
+    await callback.message.answer(
+        "🖼️ <b>اختر المدرس الذي تريد وضع لوجو صورة له:</b>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_batch_setlogo_tgt:"), AdminBatchStampStates.reviewing_batch)
+async def handle_batch_select_logo_target(callback: CallbackQuery, state: FSMContext):
+    tgt = callback.data.split(":", 1)[1]
+    data = await state.get_data()
+    entries = data.get("batch_entries", [])
+    if tgt == "all":
+        lbl = "كل المدرسين في الدفعة"
+        await state.update_data(batch_logo_target="all", batch_logo_active_idx=None)
+    else:
+        idx_val = int(tgt)
+        entry = next((e for e in entries if int(e.get("idx", 0)) == idx_val), None)
+        lbl = f"#{idx_val} — {_batch_entry_label(entry)}" if entry else f"مدرس #{idx_val}"
+        await state.update_data(batch_logo_target=f"idx:{idx_val}", batch_logo_active_idx=idx_val)
+
+    await state.set_state(AdminBatchStampStates.waiting_batch_logo)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ رجوع لمراجعة الدفعة", callback_data="adm_batch_logo:back")],
+    ])
+    await callback.message.answer(
+        f"🖼️ <b>ابعت صورة اللوجو الآن لـ ({html.escape(lbl)}):</b>\n"
+        f"<i>(أرسل الصورة الآن كصورة Photo أو ملف PNG/JPG)</i>",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm_batch_logo:skip", AdminBatchStampStates.waiting_batch_logo)
+async def handle_batch_logo_skip(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    entries = [dict(e) for e in data.get("batch_entries", [])]
+    active_idx = data.get("batch_logo_active_idx")
+    for e in entries:
+        if active_idx is not None and int(e.get("idx", 0)) == int(active_idx):
+            e["_logo_skipped"] = True
+    await state.update_data(batch_entries=entries)
+    await callback.answer("تم التخطي")
+    await _prompt_next_batch_logo_or_summary(callback.message, state)
+
+
+@router.callback_query(F.data == "adm_batch_logo:back")
+async def handle_batch_logo_back(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    entries = [dict(e) for e in data.get("batch_entries", [])]
+    for e in entries:
+        e.pop("_logo_skipped", None)
+    await state.set_state(AdminBatchStampStates.reviewing_batch)
+    await state.update_data(batch_entries=entries, batch_logo_target=None, batch_logo_active_idx=None)
+    await callback.answer()
+    await _send_batch_summary_card(callback.message, await state.get_data())
+
+
+@router.message(AdminBatchStampStates.waiting_batch_logo, F.photo | F.document)
+async def handle_batch_logo_received(message: Message, state: FSMContext):
+    if not _is_admin(message.from_user.id):
+        await state.clear()
+        return
+
+    if message.document and not message.photo:
+        mime = (message.document.mime_type or "").lower()
+        fname_chk = (message.document.file_name or "").lower()
+        if not (mime.startswith("image/") or fname_chk.endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp"))):
+            await message.answer("⚠️ يرجى إرسال صورة صالحة (PNG / JPG / Photo).")
+            return
+
+    file_id = message.photo[-1].file_id if message.photo else message.document.file_id
+    fname = (message.document.file_name if message.document else None) or "teacher_logo.png"
+    raw_bytes = await _download_telegram_bytes(message.bot, file_id)
+
+    logo_path = await bridge_client.upload_watermark_logo(raw_bytes, fname)
+    if not logo_path:
+        # مسار احتياطي محلي بنفس آلية تفريغ الإطارات
+        logos_dir = os.path.join(BASE_DIR, "Z-PACT-main", "storage", "logos")
+        os.makedirs(logos_dir, exist_ok=True)
+        logo_name = f"logo_{secrets.token_hex(6)}.png"
+        logo_abs = os.path.join(logos_dir, logo_name)
+        try:
+            from PIL import Image, ImageChops
+            import io
+            img = Image.open(io.BytesIO(raw_bytes)).convert("RGBA")
+            r, g, b, a = img.split()
+            min_rgb = ImageChops.darker(ImageChops.darker(r, g), b)
+            white_alpha = min_rgb.point(lambda v: 0 if v >= 242 else (int((242 - v) * 255 / 22) if v > 220 else 255))
+            Image.merge("RGBA", (r, g, b, ImageChops.darker(a, white_alpha))).save(logo_abs, format="PNG", optimize=True)
+        except Exception:
+            with open(logo_abs, "wb") as f:
+                f.write(raw_bytes)
+        logo_path = f"/storage/logos/{logo_name}"
+
+    data = await state.get_data()
+    entries = [dict(e) for e in data.get("batch_entries", [])]
+    target_mode = data.get("batch_logo_target")
+    active_idx = data.get("batch_logo_active_idx")
+
+    updated_labels = []
+    for e in entries:
+        if target_mode == "all" or (active_idx is not None and int(e.get("idx", 0)) == int(active_idx)):
+            e["watermark_type"] = "logo"
+            e["watermark_logo_path"] = logo_path
+            e.pop("watermark_text", None)
+            e.pop("_logo_skipped", None)
+            updated_labels.append(_batch_entry_label(e))
+
+    await state.update_data(batch_entries=entries)
+    done_txt = "كل المدرسين" if target_mode == "all" else ("، ".join(updated_labels) or "المدرس")
+    await message.answer(f"✅ تم حفظ صورة اللوجو وتعيينها كعلامة مائية لـ <b>{html.escape(done_txt)}</b>!", parse_mode="HTML")
+    await _prompt_next_batch_logo_or_summary(message, state)
+
+
 @router.message(AdminBatchStampStates.waiting_batch_frame, F.photo | F.document)
 async def handle_batch_frame_received(message: Message, state: FSMContext):
     if not _is_admin(message.from_user.id):
@@ -566,6 +793,15 @@ async def handle_batch_execute_sequential(callback: CallbackQuery, state: FSMCon
                 except Exception:
                     pass
 
+                item_wm_logo = item.get("watermark_logo_path")
+                item_wm_type = str(item.get("watermark_type") or "").strip().lower()
+                if item_wm_type == "logo" and not item_wm_logo:
+                    item_wm_type = "none"
+                elif item_wm_logo:
+                    item_wm_type = "logo"
+                elif not item_wm_type:
+                    item_wm_type = "text" if item.get("watermark_text") else "none"
+
                 payload = {
                     "material_id": item["final_material_id"],
                     "buyer_name_stamp": tname,
@@ -573,8 +809,9 @@ async def handle_batch_execute_sequential(callback: CallbackQuery, state: FSMCon
                     "buyer_phone_stamp_2": item.get("phone_2"),
                     "series_name": item.get("series_name"),
                     "doc_name_stamp": item.get("series_name"),
-                    "watermark_text": item.get("watermark_text"),
-                    "watermark_type": "text" if item.get("watermark_text") else "none",
+                    "watermark_text": None if item_wm_type == "logo" else item.get("watermark_text"),
+                    "watermark_type": item_wm_type,
+                    "watermark_logo_path": item_wm_logo,
                     "font_family": item.get("font_family") or batch_font,
                     "font_size": item.get("font_size"),
                     "override_frame_path": batch_frame,

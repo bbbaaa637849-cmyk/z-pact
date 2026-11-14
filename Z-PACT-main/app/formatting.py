@@ -3,15 +3,29 @@ import re
 # Separator pattern: matches one or more spaces, dots, slashes, backslashes, colons, or hyphens
 SEP = r'[\.\/\\:\-\s]+'
 
-# Regex for detecting professional titles that should NOT receive the "أ /" prefix
+# Invisible directional / formatting Unicode chars pasted from chats (WhatsApp / Telegram)
+_INVISIBLE_CHARS_RE = re.compile(r'[\u200b-\u200f\u202a-\u202e\u061c\ufeff]+')
+_AR_DIACRITICS_TATWEEL_RE = re.compile(r'[\u064b-\u065f\u0670\u0640]')
+
+# Professional / personal / honorific titles that should be preserved as-is WITHOUT adding "أ /"
 PROFESSIONAL_TITLES_REGEX = re.compile(
-    r'^(?:أ\.?\s*د|دكتور|الدكتور|د|مهندس|المهندس|بشمهندس|م|بروفيسور|مستشار|المستشار|لواء|اللواء|dr|eng|prof|mr|mrs|ms)' + SEP,
+    r'^(?:'
+    r'[أاإ]\.?\s*د|[أاإ]\s*[/\\]\s*د|د\.?\s*م|'
+    r'دكتور|الدكتور|دكتورة|الدكتورة|دكتوره|الدكتوره|د|'
+    r'مهندس|المهندس|مهندسة|المهندسة|مهندسه|المهندسه|بشمهندس|البشمهندس|باشمهندس|الباشمهندس|بشمهندسة|باشمهندسة|م|'
+    r'مستر|المستر|مس|المس|ميس|الميس|مسز|تيتشر|سير|'
+    r'أستاذة|الأستاذة|استاذة|الاستاذة|أستاذه|الأستاذه|استاذه|الاستاذه|'
+    r'أبلة|ابلة|الأبلة|الابلة|أبله|ابله|آنسة|انسة|الآنسة|الانسة|مدام|'
+    r'كابتن|الكابتن|كوتش|الكوتش|شيخ|الشيخ|معلم|المعلم|معلمة|المعلمة|محاضر|المحاضر|مدرب|المدرب|'
+    r'بروفيسور|البروفيسور|مستشار|المستشار|مستشارة|المستشارة|لواء|اللواء|'
+    r'dr|eng|prof|mr|mrs|ms|miss|mister|mst|teacher|coach|capt|captain|sir|doctor|engineer|sheikh|madam|madame|master'
+    r')' + SEP,
     re.UNICODE | re.IGNORECASE
 )
 
-# Regex for detecting standard teacher/instructor prefixes
+# Regex for detecting standard masculine "أ /" aliases to normalize cleanly without doubling
 TEACHER_PREFIX_REGEX = re.compile(
-    r'^(?:أستاذ|الأستاذ|استاذ|الاستاذ|أ)' + SEP,
+    r'^(?:أستاذ|الأستاذ|استاذ|الاستاذ|إستاذ|الإستاذ|أ|ا|إ)' + SEP,
     re.UNICODE | re.IGNORECASE
 )
 
@@ -22,35 +36,57 @@ PHONE_PREFIX_REGEX = re.compile(
 )
 
 
+def _match_stripped_prefix_end(text: str, pattern: re.Pattern) -> int:
+    """Match pattern after ignoring Arabic diacritics/tatweel and map match length back to text."""
+    index_map: list[int] = []
+    norm_chars: list[str] = []
+    for idx, ch in enumerate(text):
+        if _AR_DIACRITICS_TATWEEL_RE.match(ch):
+            continue
+        norm_chars.append(ch)
+        index_map.append(idx)
+    if not norm_chars:
+        return 0
+    m = pattern.match("".join(norm_chars))
+    if not m or m.end() == 0:
+        return 0
+    last_norm_idx = m.end() - 1
+    return index_map[last_norm_idx] + 1
+
+
 def format_instructor_name(name: str) -> str:
     """
     Intelligently formats an instructor's name:
-    1. Strips messy or repeated teacher prefixes ("أ/", "أ.", "أ /", "أستاذ").
-    2. Preserves professional titles ("م /", "مهندس", "د /", "دكتور") without adding "أ /".
-    3. Standardizes regular names by prepending "أ / ".
+    1. Strips invisible Unicode directional marks and messy repeated "أ /" prefixes.
+    2. Preserves titles such as "مستر", "مس", "أستاذة", "دكتور", "مهندس", "م /", "د /", etc.
+       without prepending "أ / ".
+    3. Standardizes plain names or "أستاذ / أ. / ا/" variations to "أ / <name>".
     """
     if not name or not isinstance(name, str):
         return ""
-        
-    cleaned = name.strip()
-    
-    # Check if input already starts with a professional title
-    if PROFESSIONAL_TITLES_REGEX.match(cleaned):
+
+    cleaned = _INVISIBLE_CHARS_RE.sub("", name)
+    cleaned = " ".join(cleaned.strip().split())
+    if not cleaned:
+        return ""
+
+    # Check if input already starts with a preserved title (e.g. مستر, مس, أستاذة, دكتور, مهندس)
+    if _match_stripped_prefix_end(cleaned, PROFESSIONAL_TITLES_REGEX):
         return cleaned
-        
-    # Strip all occurrences of teacher prefixes (handles double prefixes like "أ / أ /")
+
+    # Strip all occurrences of standard teacher prefixes (handles "أ / أ /", "ا/", "أستاذ", "الاستاذ")
     while True:
-        m = TEACHER_PREFIX_REGEX.match(cleaned)
-        if m:
-            cleaned = cleaned[m.end():].strip()
+        cut_end = _match_stripped_prefix_end(cleaned, TEACHER_PREFIX_REGEX)
+        if cut_end > 0:
+            cleaned = cleaned[cut_end:].strip()
         else:
             break
-            
-    # After stripping teacher prefixes, check again if what remains is a professional title
-    # (e.g., if user input was "أ / دكتور محمد")
-    if PROFESSIONAL_TITLES_REGEX.match(cleaned):
+
+    # After stripping "أ /" or "أستاذ", check again if what remains is a preserved title
+    # (e.g. "أ / مستر أحمد" -> "مستر أحمد", "أ / دكتور محمد" -> "دكتور محمد")
+    if _match_stripped_prefix_end(cleaned, PROFESSIONAL_TITLES_REGEX):
         return cleaned
-        
+
     return f"أ / {cleaned}" if cleaned else ""
 
 

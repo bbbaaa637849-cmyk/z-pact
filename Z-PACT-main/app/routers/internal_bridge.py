@@ -37,6 +37,7 @@ from app.stamper import (
     get_default_stamp_elements,
     list_available_fonts,
     process_frame_image_to_transparent_png,
+    process_logo_image_to_transparent_png,
     render_stamped_page_preview_png,
     _resolve_material_path,
     _resolve_asset_path,
@@ -1408,6 +1409,30 @@ def get_available_fonts_endpoint(_key: str = Depends(verify_internal_key)):
     return {"fonts": list_available_fonts()}
 
 
+@router.post("/admin/logos/upload", summary="رفع وحفظ صورة لوجو علامة مائية شفافة لإعادة استخدامها في الدفعات")
+async def upload_watermark_logo_endpoint(
+    logo_image: UploadFile = File(...),
+    _key: str = Depends(verify_internal_key),
+):
+    logos_dir = os.path.join(settings.STORAGE_DIR, "logos")
+    os.makedirs(logos_dir, exist_ok=True)
+    logo_name = f"logo_{secrets.token_hex(6)}.png"
+    logo_abs = os.path.join(logos_dir, logo_name)
+
+    raw_bytes = await logo_image.read()
+    if not raw_bytes:
+        raise HTTPException(status_code=400, detail="ملف اللوجو فارغ")
+
+    try:
+        process_logo_image_to_transparent_png(raw_bytes, logo_abs)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"صورة اللوجو غير صالحة: {e}")
+
+    rel_path = f"/storage/logos/{logo_name}"
+    logger.info(f"🖼️ [Admin Logo] تم رفع وحفظ لوجو علامة مائية: {rel_path}")
+    return {"status": "ok", "watermark_logo_path": rel_path}
+
+
 @router.post("/admin/materials/{material_id}/frame", summary="رفع ودمج إطار شفاف للصفحات على مذكرة معينة")
 async def upload_material_frame(
     material_id: int,
@@ -1628,7 +1653,10 @@ async def preview_material_page_post(
     if not pdf_path or not os.path.exists(pdf_path):
         raise HTTPException(status_code=404, detail="ملف الـ PDF الأصلي غير موجود")
 
-    _, db_elements = _get_or_build_layout_elements(db, material_id)
+    wm_type = str(payload.get("watermark_type") or "text").strip().lower()
+    wm_logo_path = str(payload.get("watermark_logo_path") or "").strip() or None
+    desired_lt = LayoutType.DEFAULT_LOGO if wm_type in ("logo", "teacher", "platform", "image") else LayoutType.DEFAULT_TEXT
+    _, db_elements = _get_or_build_layout_elements(db, material_id, desired_lt)
     elements = payload.get("stamp_elements") or db_elements
     page = int(payload.get("page", 1) or 1)
     zoom = float(payload.get("zoom", 1.35) or 1.35)
@@ -1643,7 +1671,8 @@ async def preview_material_page_post(
         buyer_phone_2=payload.get("buyer_phone_2"),
         doc_name_stamp=str(payload.get("doc_name_stamp") or "سلسلة التفوق"),
         watermark_text=str(payload.get("watermark_text") or "نسخة معاينة"),
-        watermark_type=str(payload.get("watermark_type") or "text"),
+        watermark_type=wm_type,
+        watermark_logo_path=wm_logo_path,
         material_tag=mat.tag,
         page_frame_path=payload.get("override_frame_path") or mat.page_frame_path,
         zoom=min(2.2, max(0.6, zoom)),
@@ -1676,7 +1705,16 @@ async def direct_stamp_sync_endpoint(
     raw_phone2 = str(payload.get("buyer_phone_stamp_2") or "").strip() or None
     series_name = str(payload.get("series_name") or payload.get("doc_name_stamp") or "").strip() or None
     wm_text = str(payload.get("watermark_text") or "").strip() or None
-    wm_type = str(payload.get("watermark_type") or ("text" if wm_text else "none")).strip().lower()
+    wm_logo_path = str(payload.get("watermark_logo_path") or "").strip() or None
+    raw_wm_type = str(payload.get("watermark_type") or "").strip().lower()
+    if raw_wm_type in ("logo", "teacher", "platform", "image"):
+        wm_type = "logo"
+    elif wm_logo_path and not wm_text:
+        wm_type = "logo"
+    elif wm_text:
+        wm_type = "text"
+    else:
+        wm_type = "none"
 
     tg_uid = payload.get("telegram_user_id")
     if tg_uid is not None and str(tg_uid).strip():
@@ -1690,6 +1728,7 @@ async def direct_stamp_sync_endpoint(
         series_name=series_name,
         doc_name_stamp=payload.get("doc_name_stamp"),
         watermark_text=wm_text,
+        watermark_logo_path=wm_logo_path,
         is_admin=is_admin_actor,
     )
     if not ok_stamp:
@@ -1702,7 +1741,8 @@ async def direct_stamp_sync_endpoint(
     if blacklist_msg:
         raise HTTPException(status_code=403, detail=blacklist_msg)
 
-    _, raw_elements = _get_or_build_layout_elements(db, mat.id)
+    desired_lt = LayoutType.DEFAULT_LOGO if wm_type in ("logo", "teacher", "platform", "image") else LayoutType.DEFAULT_TEXT
+    _, raw_elements = _get_or_build_layout_elements(db, mat.id, desired_lt)
     override_font = payload.get("font_family")
     font_size_delta = float(payload.get("font_size_delta") or 0)
     explicit_font_size = payload.get("font_size")
@@ -1737,6 +1777,7 @@ async def direct_stamp_sync_endpoint(
         series_name=series_name,
         watermark_text=wm_text,
         watermark_type=wm_type,
+        watermark_logo_path=wm_logo_path,
         amount_paid=float(mat.price or 0.0),
         status=PurchaseStatus.PROCESSING,
         transaction_id=order_code,
@@ -1759,6 +1800,7 @@ async def direct_stamp_sync_endpoint(
         series_name=series_name,
         watermark_text=wm_text,
         watermark_type=wm_type,
+        watermark_logo_path=wm_logo_path,
         total_amount=float(mat.price or 0.0),
         payment_method="admin_batch",
         claimed_sender_phone=phone1,
@@ -1770,6 +1812,10 @@ async def direct_stamp_sync_endpoint(
 
     raw_frame_ref = payload.get("override_frame_path") or mat.page_frame_path
     resolved_frame = _resolve_asset_path(raw_frame_ref, "frames")
+    resolved_wm_logo = (
+        _resolve_asset_path(wm_logo_path, "logos")
+        or _resolve_asset_path(wm_logo_path, "watermarks")
+    ) if wm_logo_path else None
 
     async with STAMP_SEMAPHORE:
         try:
@@ -1788,7 +1834,7 @@ async def direct_stamp_sync_endpoint(
                 mat.tag,
                 resolved_frame,
                 wm_type,
-                None,
+                resolved_wm_logo or wm_logo_path,
                 phone2,
                 True,  # fast_batch=True لتقليل ضغط المعالج
                 final_target_path,

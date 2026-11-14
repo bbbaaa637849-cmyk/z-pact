@@ -44,6 +44,26 @@ def test_instructor_name_formatting():
     
     # 5. Redundant teacher prefix before professional title -> cleaned
     assert format_instructor_name("أ / دكتور محمد") == "دكتور محمد"
+    assert format_instructor_name("أ / مستر علي") == "مستر علي"
+    assert format_instructor_name("أ / أستاذة سارة") == "أستاذة سارة"
+
+    # 6. Modern / varied honorific titles -> never prefixed with "أ / "
+    assert format_instructor_name("مستر أحمد") == "مستر أحمد"
+    assert format_instructor_name("المستر محمود") == "المستر محمود"
+    assert format_instructor_name("مس سارة") == "مس سارة"
+    assert format_instructor_name("ميس هبة") == "ميس هبة"
+    assert format_instructor_name("أستاذة سارة") == "أستاذة سارة"
+    assert format_instructor_name("الأستاذة فاطمة") == "الأستاذة فاطمة"
+    assert format_instructor_name("دكتورة منى") == "دكتورة منى"
+    assert format_instructor_name("باشمهندس طارق") == "باشمهندس طارق"
+    assert format_instructor_name("كابتن علي") == "كابتن علي"
+
+    # 7. Slash variations, diacritics, tatweel, and invisible RTL marks
+    assert format_instructor_name("ا/ خالد") == "أ / خالد"
+    assert format_instructor_name("إستاذ حسن") == "أ / حسن"
+    assert format_instructor_name("\u200fمستر محمد") == "مستر محمد"
+    assert format_instructor_name("أُسْتَاذ مـحـمـد") == "أ / مـحـمـد"
+    assert format_instructor_name("مِسْتَرْ طَارِقْ") == "مِسْتَرْ طَارِقْ"
     
     print("✅ All instructor name formatting tests passed successfully!")
 
