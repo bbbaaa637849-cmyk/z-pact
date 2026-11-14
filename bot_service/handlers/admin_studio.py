@@ -47,7 +47,7 @@ router = Router(name="admin_studio_router")
 # قفل متسلسل لمنع تشغيل دفعتين في وقت واحد وحماية المعالج المحلي
 _BATCH_LOCK = asyncio.Lock()
 
-TMP_UPLOAD_DIR = os.path.join(BASE_DIR, "storage", "bot_tmp")
+TMP_UPLOAD_DIR = os.path.join(bot_config.STORAGE_DIR, "bot_tmp")
 os.makedirs(TMP_UPLOAD_DIR, exist_ok=True)
 
 

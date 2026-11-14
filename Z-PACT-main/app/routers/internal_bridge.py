@@ -974,7 +974,20 @@ def get_internal_admin_stats(
     total_sms_logs = db.query(func.count(PaymentSMSLog.id)).scalar() or 0
     unreconciled_sms_logs = db.query(func.count(PaymentSMSLog.id)).filter(PaymentSMSLog.is_reconciled == False).scalar() or 0
 
-    recent_orders = db.query(BotOrder).order_by(BotOrder.id.desc()).limit(10).all()
+    latest_orders = db.query(BotOrder).order_by(BotOrder.id.desc()).limit(10).all()
+    undelivered_orders = (
+        db.query(BotOrder)
+        .filter(BotOrder.status == OrderFulfillmentStatus.READY_FOR_DELIVERY)
+        .order_by(BotOrder.id.asc())
+        .limit(50)
+        .all()
+    )
+    seen_order_ids = set()
+    recent_orders = []
+    for o in (*undelivered_orders, *latest_orders):
+        if o.id not in seen_order_ids:
+            seen_order_ids.add(o.id)
+            recent_orders.append(o)
     recent_unmatched_sms = db.query(PaymentSMSLog).filter(PaymentSMSLog.is_reconciled == False).order_by(PaymentSMSLog.id.desc()).limit(10).all()
 
     return schemas.InternalAdminStats(

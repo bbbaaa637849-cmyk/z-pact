@@ -242,6 +242,7 @@ class TestIsolatedMobileStudioBridgeAPI(unittest.TestCase):
         cls.orig_materials_frames = materials_mod.FRAMES_DIR
         cls.orig_db_session_local = app_db.SessionLocal
         cls.orig_bridge_session_local = bridge_mod.SessionLocal
+        cls.orig_stamper_session_local = stamper_mod.SessionLocal
 
         test_storage = os.path.join(cls.test_dir.name, "storage")
         for sub in ("stamped", "previews", "frames", "originals", "covers"):
@@ -261,6 +262,7 @@ class TestIsolatedMobileStudioBridgeAPI(unittest.TestCase):
 
         app_db.SessionLocal = cls.TestingSession
         bridge_mod.SessionLocal = cls.TestingSession
+        stamper_mod.SessionLocal = cls.TestingSession
 
         db = cls.TestingSession()
         admin = User(
@@ -295,6 +297,7 @@ class TestIsolatedMobileStudioBridgeAPI(unittest.TestCase):
             app.dependency_overrides.pop(get_db, None)
         app_db.SessionLocal = cls.orig_db_session_local
         bridge_mod.SessionLocal = cls.orig_bridge_session_local
+        stamper_mod.SessionLocal = cls.orig_stamper_session_local
         type(settings).STORAGE_DIR = cls.orig_storage_prop
         stamper_mod.OUTPUT_DIR = cls.orig_stamper_output
         stamper_mod.PREVIEW_DIR = cls.orig_stamper_preview
@@ -1191,6 +1194,124 @@ class TestIsolatedMobileStudioBridgeAPI(unittest.TestCase):
                     os.environ.pop(k, None)
                 else:
                     os.environ[k] = v
+
+    def test_15_crash_recovery_and_persistent_sqlite_fsm(self):
+        """التحقق من استمرارية حالات البوت في SQLite واستئناف طلبات الختم المنقطعة بعد إعادة التشغيل"""
+        import asyncio
+        from aiogram.fsm.storage.base import StorageKey
+        from bot_service.sqlite_fsm import SQLiteStorage
+        from app.models import BotOrder, Material, OrderFulfillmentStatus, Purchase, PurchaseStatus, StampLayout, LayoutType
+        from app.recovery import collect_and_heal_interrupted_jobs_sync
+        from app.stamper import get_default_stamp_elements, stamp_pdf
+
+        # 1. محاكاة إغلاق وفتح SQLiteStorage وسط محادثة تيليجرام
+        fsm_db = os.path.join(self.test_dir.name, "test_bot_fsm.db")
+        s_key = StorageKey(bot_id=9095, chat_id=8287744705, user_id=8287744705)
+
+        async def _fsm_roundtrip():
+            store1 = SQLiteStorage(fsm_db)
+            await store1.set_state(s_key, "OrderFlow:waiting_receipt")
+            await store1.set_data(s_key, {"buyer_name_stamp": "أ/ محمود ربيع", "material_id": 18})
+            await store1.close()
+
+            store2 = SQLiteStorage(fsm_db)
+            state_after = await store2.get_state(s_key)
+            data_after = await store2.get_data(s_key)
+            await store2.close()
+            return state_after, data_after
+
+        restored_state, restored_data = asyncio.run(_fsm_roundtrip())
+        self.assertEqual(restored_state, "OrderFlow:waiting_receipt")
+        self.assertEqual(restored_data.get("buyer_name_stamp"), "أ/ محمود ربيع")
+        self.assertEqual(restored_data.get("material_id"), 18)
+
+        # 2. محاكاة انقطاع السيرفر أثناء ختم طلب (PROCESSING / PROCESSING_STAMP) ثم الاستشفاء عند الإقلاع
+        from app.config import settings
+        orig_dir = os.path.join(settings.STORAGE_DIR, "originals")
+        os.makedirs(orig_dir, exist_ok=True)
+        pdf_file = os.path.join(orig_dir, "recovery_probe.pdf")
+        with open(pdf_file, "wb") as f:
+            f.write(_make_sample_pdf_bytes(pages=2))
+
+        db = self.TestingSession()
+        try:
+            mat = Material(
+                uploaded_by=1,
+                title="مذكرة اختبار الاستشفاء",
+                tag="فيزياء",
+                description="recovery test",
+                price=50.0,
+                price_coins=50.0,
+                original_pdf_path="storage/originals/recovery_probe.pdf",
+                total_pages=2,
+                is_published=True,
+                compression_enabled=True,
+            )
+            db.add(mat)
+            db.commit()
+            db.refresh(mat)
+
+            lay = StampLayout(
+                material_id=mat.id,
+                created_by=1,
+                layout_type=LayoutType.DEFAULT_TEXT,
+                stamp_elements=get_default_stamp_elements("cairo"),
+            )
+            db.add(lay)
+            db.commit()
+            db.refresh(lay)
+
+            purchase = Purchase(
+                buyer_id=1,
+                material_id=mat.id,
+                stamp_layout_id=lay.id,
+                buyer_name_stamp="أ/ طارق سعيد",
+                buyer_phone_stamp="01012345678",
+                doc_name_stamp="سلسلة الإبداع",
+                amount_paid=50.0,
+                status=PurchaseStatus.PROCESSING,
+                transaction_id="ORD-REC-01",
+            )
+            db.add(purchase)
+            db.commit()
+            db.refresh(purchase)
+
+            order = BotOrder(
+                order_code="ORD-REC-01",
+                telegram_chat_id="8287744705",
+                telegram_user_id="8287744705",
+                user_id=1,
+                material_id=mat.id,
+                purchase_id=purchase.id,
+                buyer_name_stamp="أ/ طارق سعيد",
+                buyer_phone_stamp="01012345678",
+                doc_name_stamp="سلسلة الإبداع",
+                series_name="سلسلة الإبداع",
+                total_amount=50.0,
+                status=OrderFulfillmentStatus.PROCESSING_STAMP,
+            )
+            db.add(order)
+            db.commit()
+            p_id = purchase.id
+            o_id = order.id
+        finally:
+            db.close()
+
+        resumed_jobs = collect_and_heal_interrupted_jobs_sync()
+        job = next((j for j in resumed_jobs if j["purchase_id"] == p_id), None)
+        self.assertIsNotNone(job)
+
+        asyncio.run(stamp_pdf(**job))
+
+        db2 = self.TestingSession()
+        try:
+            p_after = db2.query(Purchase).filter(Purchase.id == p_id).first()
+            o_after = db2.query(BotOrder).filter(BotOrder.id == o_id).first()
+            self.assertEqual(p_after.status, PurchaseStatus.COMPLETED)
+            self.assertEqual(o_after.status, OrderFulfillmentStatus.READY_FOR_DELIVERY)
+            self.assertTrue(p_after.output_pdf_path and os.path.isfile(p_after.output_pdf_path))
+        finally:
+            db2.close()
 
 
 if __name__ == "__main__":

@@ -35,13 +35,30 @@ def _derive_railway_miniapp_url() -> str:
     return f"{raw_domain}/miniapp/"
 
 
-def _resolve_bot_storage_dir() -> str:
-    """استخدام Volume السحابة إن كان مفعلاً وقابلاً للكتابة، وإلا المجلد المرفق بالمشروع."""
+def _detect_bot_volume_root() -> str:
     if os.name != "nt":
         for cand in (os.getenv("RAILWAY_VOLUME_MOUNT_PATH"), "/.data"):
             if cand and os.path.isdir(cand) and os.access(cand, os.W_OK):
-                return os.path.join(os.path.abspath(cand), "storage")
+                return os.path.abspath(cand)
+    return ""
+
+
+def _resolve_bot_storage_dir() -> str:
+    """استخدام Volume السحابة إن كان مفعلاً وقابلاً للكتابة، وإلا المجلد المرفق بالمشروع."""
+    vol_root = _detect_bot_volume_root()
+    if vol_root:
+        return os.path.join(vol_root, "storage")
     return os.path.join(BASE_DIR, "Z-PACT-main", "storage")
+
+
+# تحميل الإعدادات الحية الدائمة من الـ Volume (مثل أرقام المحافظ وقائمة المشرفين) فوق الإعدادات الافتراضية
+_VOLUME_RUNTIME_ENV = (
+    os.path.join(_detect_bot_volume_root(), ".zpact_runtime.env")
+    if _detect_bot_volume_root()
+    else ""
+)
+if _VOLUME_RUNTIME_ENV and os.path.isfile(_VOLUME_RUNTIME_ENV):
+    load_dotenv(_VOLUME_RUNTIME_ENV, override=True)
 
 
 _RUNTIME_PORT = (os.getenv("PORT") or "8000").strip()
@@ -173,12 +190,16 @@ class BotConfig:
         return live_url
 
     def _persist_env(self, key: str, value: str):
-        """تحديث القيمة داخل ملفات .env للحفاظ عليها بعد إعادة التشغيل"""
+        """تحديث القيمة داخل ملفات .env + ملف الـ Volume الدائم للحفاظ على الإعدادات بعد إعادة التشغيل"""
         import re
         targets = [os.path.join(BASE_DIR, ".env"), os.path.join(BASE_DIR, "Z-PACT-main", ".env")]
         existing_targets = [p for p in targets if os.path.exists(p)]
         if not existing_targets:
             existing_targets = [os.path.join(BASE_DIR, "Z-PACT-main", ".env")]
+
+        vol_root = _detect_bot_volume_root()
+        if vol_root and key != "MINIAPP_URL":
+            existing_targets.append(os.path.join(vol_root, ".zpact_runtime.env"))
 
         for env_path in existing_targets:
             try:

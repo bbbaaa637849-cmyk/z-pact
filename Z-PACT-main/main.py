@@ -64,7 +64,15 @@ async def lifespan(app: FastAPI):
     # تشغيل عامل النظافة في الخلفية
     from app.worker import start_cleanup_worker
     asyncio.create_task(start_cleanup_worker())
-    
+
+    # الاستشفاء التلقائي للمهام المنقطعة أثناء الختم عند إعادة التشغيل
+    try:
+        from app.recovery import recover_interrupted_stamps
+        asyncio.create_task(recover_interrupted_stamps(delay_seconds=2.0))
+        logger.info("✓ تم تفعيل مراقب الاستشفاء التلقائي للمهام المنقطعة")
+    except Exception as e:
+        logger.warning(f"⚠️ تعذر جدولة الاستشفاء التلقائي: {e}")
+
     # تشغيل الجدولة للنسخ الاحتياطي بأمان
     try:
         if app_scheduler is None:
@@ -76,12 +84,21 @@ async def lifespan(app: FastAPI):
         logger.warning(f"⚠️ تحذير أثناء تشغيل الجدولة: {e}")
         
     yield
-    # عند الإيقاف: إيقاف الجدولة بأمان
+    # عند الإيقاف: إيقاف الجدولة ودمج سجلات SQLite WAL بأمان على القرص
     if app_scheduler and app_scheduler.running:
         try:
             app_scheduler.shutdown(wait=False)
         except Exception:
             pass
+    try:
+        from app.database import engine
+        if "sqlite" in settings.DATABASE_URL and os.path.exists(settings.DATABASE_PATH):
+            import sqlite3
+            with sqlite3.connect(settings.DATABASE_PATH, timeout=10.0) as _ck:
+                _ck.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        engine.dispose()
+    except Exception:
+        pass
 
 
 # ================================================================
@@ -389,9 +406,11 @@ def run_database_backup():
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_filename = f"backup_{timestamp}.db"
         backup_path = os.path.join(backup_dir, backup_filename)
-        
-        shutil.copy2(db_path, backup_path)
-        logger.info(f"✅ Automated backup created: {backup_filename}")
+
+        import sqlite3
+        with sqlite3.connect(db_path, timeout=30.0) as src_conn, sqlite3.connect(backup_path) as dst_conn:
+            src_conn.backup(dst_conn)
+        logger.info(f"✅ Automated consistent SQLite backup created: {backup_filename}")
         
         # Keep only last 10 backups
         backups = sorted([f for f in os.listdir(backup_dir) if f.endswith(".db")])

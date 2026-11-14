@@ -8,7 +8,6 @@ import html
 import asyncio
 import logging
 from aiogram import Bot, Dispatcher
-from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
@@ -27,6 +26,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from bot_service.config import bot_config
+from bot_service.sqlite_fsm import SQLiteStorage
 from bot_service.services.notifier import RealTimeNotifier
 from bot_service.handlers import (
     start_router,
@@ -55,12 +55,13 @@ async def main():
     logger.info(f"👑 عدد المشرفين المسجلين: {len(bot_config.ADMIN_TELEGRAM_IDS)}")
     logger.info("==================================================")
 
-    # 1. تهيئة البوت ومخزن الجلسات
+    # 1. تهيئة البوت ومخزن الجلسات الدائم (SQLite FSM) للحفاظ على خطوات المستخدم عند إعادة التشغيل
     bot = Bot(
         token=bot_config.BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML)
     )
-    storage = MemoryStorage()
+    fsm_db_path = os.path.join(bot_config.STORAGE_DIR, "bot_fsm_state.db")
+    storage = SQLiteStorage(fsm_db_path)
     dp = Dispatcher(storage=storage)
 
     # 2. تسجيل موجهات الأحداث (Routers) بالترتيب المنطقي
@@ -168,15 +169,15 @@ async def main():
     async def on_shutdown():
         logger.info("🛑 إيقاف مستمع الأحداث وجلسة البوت...")
         await notifier.stop()
+        await storage.close()
         await bot.session.close()
 
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
 
-    # 4. بدء استقبال التحديثات عبر Polling
+    # 4. بدء استقبال التحديثات عبر Polling (مع الاحتفاظ برسائل العملاء الواردة أثناء لحظة إعادة التشغيل)
     try:
-        # حذف أي ويب هوك قديم لضمان عمل الـ polling بدون تعارض
-        await bot.delete_webhook(drop_pending_updates=True)
+        await bot.delete_webhook(drop_pending_updates=False)
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     except (asyncio.CancelledError, KeyboardInterrupt):
         logger.info("👋 تم استلام إشارة إيقاف البوت بنجاح.")

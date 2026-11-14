@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from app import crud, schemas, models
 from app.auth import get_current_user
-from app.config import stamp_settings
+from app.config import settings, stamp_settings
 from app.database import get_db
 from app.models import Purchase, PurchaseStatus, User, UserRole, SpendingLevel, Coupon, Notification
 from app.stamper import stamp_pdf  # محرك الختم (المهمة 4)
@@ -592,8 +592,9 @@ def request_download_token(
     if not purchase or purchase.buyer_id != current_user.id:
         raise HTTPException(status_code=404, detail="العملية غير موجودة")
 
-    # 1. التحقق من وجود الملف فعلياً على القرص
-    file_exists = purchase.output_pdf_path and os.path.exists(purchase.output_pdf_path)
+    # 1. التحقق من وجود الملف فعلياً على القرص (مع دعم المسارات عبر البيئات والـ Volume)
+    resolved_output = settings.resolve_storage_path(purchase.output_pdf_path, "stamped")
+    file_exists = bool(resolved_output and os.path.exists(resolved_output))
 
     # 2. إذا كان الملف غير موجود أو الحالة ليست مكتملة
     if purchase.status != PurchaseStatus.COMPLETED or not file_exists:
@@ -625,7 +626,7 @@ def request_download_token(
     # حفظ التوكن مؤقتاً في الذاكرة
     _download_tokens[token] = {
         "purchase_id": purchase_id,
-        "file_path":   purchase.output_pdf_path,
+        "file_path":   resolved_output,
         "expires_at":  expires_at,
         "used":        False,
     }

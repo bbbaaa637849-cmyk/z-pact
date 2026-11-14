@@ -31,6 +31,9 @@ Z-PACT-main/storage/stamped/*
 !Z-PACT-main/storage/stamped/.gitkeep
 Z-PACT-main/storage/previews/*
 !Z-PACT-main/storage/previews/.gitkeep
+Z-PACT-main/storage/bot_tmp/
+Z-PACT-main/storage/backups/
+Z-PACT-main/storage/bot_fsm_state.db*
 Z-PACT-main/backups/*
 
 # Android Studio project source (root Z-PACT-*.apk files are kept)

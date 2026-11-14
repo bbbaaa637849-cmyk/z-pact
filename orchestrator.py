@@ -249,7 +249,7 @@ class ServiceProcess:
             log_orch(f"🛑 جاري إيقاف خدمة [{self.name}]...", COLOR_YELLOW)
             try:
                 self.process.terminate()
-                await asyncio.wait_for(self.process.wait(), timeout=4.0)
+                await asyncio.wait_for(self.process.wait(), timeout=10.0)
             except (asyncio.TimeoutError, ProcessLookupError):
                 try:
                     self.process.kill()

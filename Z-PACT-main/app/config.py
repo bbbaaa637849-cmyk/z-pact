@@ -21,23 +21,46 @@ import stamp_settings  # noqa: E402,F401 — الملف المركزي لإعد�
 env_path = os.path.join(BASE_DIR, '.env')
 load_dotenv(dotenv_path=env_path)
 
+def _detect_volume_root() -> Optional[str]:
+    """اكتشاف مجلد الـ Volume الدائم على السحابة (Railway) عند توفره وقابليته للكتابة."""
+    if os.name == "nt":
+        return None
+    for candidate in (os.getenv("RAILWAY_VOLUME_MOUNT_PATH"), "/.data"):
+        if candidate and os.path.isdir(candidate) and os.access(candidate, os.W_OK):
+            return os.path.abspath(candidate)
+    return None
+
+
 def _get_or_create_jwt_secret():
     env_secret = os.getenv("JWT_SECRET_KEY")
     if env_secret and env_secret != "change-me-in-production-please":
         return env_secret
-    secret_file = os.path.join(BASE_DIR, ".jwt_secret")
-    if os.path.exists(secret_file):
-        try:
-            with open(secret_file, "r", encoding="utf-8") as f:
-                s = f.read().strip()
-                if len(s) >= 32:
-                    return s
-        except Exception:
-            pass
+
+    volume_root = _detect_volume_root()
+    local_secret = os.path.join(BASE_DIR, ".jwt_secret")
+    vol_secret = os.path.join(volume_root, ".jwt_secret") if volume_root else None
+
+    for candidate in (vol_secret, local_secret):
+        if candidate and os.path.exists(candidate):
+            try:
+                with open(candidate, "r", encoding="utf-8") as f:
+                    s = f.read().strip()
+                    if len(s) >= 32:
+                        if vol_secret and candidate != vol_secret:
+                            try:
+                                with open(vol_secret, "w", encoding="utf-8") as vf:
+                                    vf.write(s)
+                            except Exception:
+                                pass
+                        return s
+            except Exception:
+                pass
+
     import secrets
     new_secret = secrets.token_hex(32)
+    target_file = vol_secret or local_secret
     try:
-        with open(secret_file, "w", encoding="utf-8") as f:
+        with open(target_file, "w", encoding="utf-8") as f:
             f.write(new_secret)
     except Exception:
         pass
@@ -54,12 +77,7 @@ class Settings:
 
     def _active_volume_root(self) -> Optional[str]:
         """تحديد مجلد Volume المستمر (إن وُجد وكان قابلاً للكتابة) مع تهيئته بالبيانات المرفقة عند أول تشغيل."""
-        if os.name == "nt":
-            return None
-        for candidate in (os.getenv("RAILWAY_VOLUME_MOUNT_PATH"), "/.data"):
-            if candidate and os.path.isdir(candidate) and os.access(candidate, os.W_OK):
-                return os.path.abspath(candidate)
-        return None
+        return _detect_volume_root()
 
     def _seed_volume_once(self, volume_root: str) -> None:
         """نسخ قاعدة البيانات والأصول المرفقة إلى الـ Volume مرة واحدة فقط إذا كان فارغاً."""
