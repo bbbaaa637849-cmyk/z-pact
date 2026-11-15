@@ -37,7 +37,7 @@ def _derive_railway_miniapp_url() -> str:
 
 def _detect_bot_volume_root() -> str:
     if os.name != "nt":
-        for cand in (os.getenv("RAILWAY_VOLUME_MOUNT_PATH"), "/.data"):
+        for cand in (os.getenv("RAILWAY_VOLUME_MOUNT_PATH"), "/.data", "/data"):
             if cand and os.path.isdir(cand) and os.access(cand, os.W_OK):
                 return os.path.abspath(cand)
     return ""

@@ -722,6 +722,21 @@ def download_stamped_order_pdf(
     )
 
 
+@router.post("/orders/{order_code}/cleanup-file", summary="حذف ملف الـ PDF المؤقت بعد تأكيد تسليمه للتيليجرام")
+def cleanup_delivered_order_file(
+    order_code: str,
+    db: Session = Depends(get_db),
+    _key: str = Depends(verify_internal_key),
+):
+    """يحذف نسخة المخرجات المؤقتة في stamped فقط بعد استلام البوت وتأكيد إرسالها للتيليجرام."""
+    from app.worker import cleanup_order_stamped_file
+    removed = cleanup_order_stamped_file(db, order_code)
+    return {
+        "status": "cleaned" if removed else "skipped",
+        "order_code": order_code,
+    }
+
+
 # ================================================================
 # 8. مسار معالجة ومطابقة رسائل الـ SMS (SMS Webhook Reconcile)
 # ================================================================
@@ -1776,6 +1791,19 @@ async def direct_stamp_sync_endpoint(
     if not pdf_path or not os.path.exists(pdf_path):
         raise HTTPException(status_code=404, detail=f"ملف الـ PDF الأصلي للمذكرة '{mat.title}' غير موجود")
 
+    from app.worker import ensure_disk_headroom
+    input_mb = os.path.getsize(pdf_path) / (1024.0 * 1024.0)
+    ok_disk, free_mb = await asyncio.to_thread(
+        ensure_disk_headroom,
+        min_free_mb=max(45.0, input_mb * 2.0 + 15.0),
+        hard_min_mb=max(12.0, input_mb + 4.0),
+    )
+    if not ok_disk:
+        raise HTTPException(
+            status_code=507,
+            detail=f"مساحة القرص على السيرفر ممتلئة ({free_mb:.1f} MB متبقية فقط). يرجى توسيع مساحة الـ Volume في Railway.",
+        )
+
     buyer_name = str(payload.get("buyer_name_stamp") or "").strip()
     raw_phone1 = str(payload.get("buyer_phone_stamp") or "").strip()
     raw_phone2 = str(payload.get("buyer_phone_stamp_2") or "").strip() or None
@@ -1894,9 +1922,9 @@ async def direct_stamp_sync_endpoint(
     ) if wm_logo_path else None
 
     async with STAMP_SEMAPHORE:
+        from app.stamper import OUTPUT_DIR as STAMPER_OUT_DIR
+        final_target_path = f"{STAMPER_OUT_DIR}/{purchase.id}_final.pdf"
         try:
-            from app.stamper import OUTPUT_DIR as STAMPER_OUT_DIR
-            final_target_path = f"{STAMPER_OUT_DIR}/{purchase.id}_final.pdf"
             mark_entries: list[dict] = []
             final_path = await asyncio.to_thread(
                 _stamp_native,
@@ -1943,11 +1971,21 @@ async def direct_stamp_sync_endpoint(
                 "download_url": f"/api/internal/orders/{order_code}/download",
             }
         except Exception as e:
+            from app.worker import safe_remove_file
+            safe_remove_file(final_target_path)
             logger.error(f"❌ [Batch Stamp Error] {order_code}: {e}")
-            crud.update_purchase_status(db, purchase.id, PurchaseStatus.FAILED)
-            order.status = OrderFulfillmentStatus.FAILED
-            order.error_message = str(e)
-            db.commit()
+            try:
+                db.rollback()
+                crud.update_purchase_status(db, purchase.id, PurchaseStatus.FAILED)
+                order.status = OrderFulfillmentStatus.FAILED
+                order.error_message = str(e)
+                db.commit()
+            except Exception as db_err:
+                logger.warning(f"⚠️ [Batch Stamp Cleanup] تعذر تحديث حالة الفشل في DB: {db_err}")
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
             raise HTTPException(status_code=500, detail=f"فشل ختم المذكرة: {e}")
 
 

@@ -47,6 +47,56 @@ logging.basicConfig(
 logger = logging.getLogger("bot_service")
 
 
+def _maintain_bot_storage(fsm_db_path: str) -> None:
+    """تنظيف الجلسات القديمة ومجلد bot_tmp وضغط سجل WAL لحفظ مساحة القرص."""
+    import sqlite3
+    import time
+
+    tmp_dir = os.path.join(bot_config.STORAGE_DIR, "bot_tmp")
+    if os.path.isdir(tmp_dir):
+        now = time.time()
+        try:
+            for entry in os.scandir(tmp_dir):
+                if entry.name == ".gitkeep":
+                    continue
+                if entry.is_file(follow_symlinks=False) and (now - entry.stat(follow_symlinks=False).st_mtime) > 3600:
+                    try:
+                        os.remove(entry.path)
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+
+    if fsm_db_path and os.path.isfile(fsm_db_path):
+        try:
+            with sqlite3.connect(fsm_db_path, timeout=10.0) as conn:
+                cur = conn.cursor()
+                cols = {row[1] for row in cur.execute("PRAGMA table_info(fsm_states)").fetchall()}
+                if "state" in cols and "data" in cols:
+                    cur.execute("DELETE FROM fsm_states WHERE state IS NULL AND (data IS NULL OR data = '{}')")
+                if "updated_at" in cols:
+                    cutoff = time.time() - (7 * 24 * 3600)
+                    cur.execute(
+                        "DELETE FROM fsm_states WHERE typeof(updated_at) IN ('integer', 'real') AND updated_at < ?",
+                        (cutoff,),
+                    )
+                conn.commit()
+                cur.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception as e:
+            logger.debug(f"[Bot Storage Maintenance] {e}")
+
+
+async def _bot_storage_maintenance_loop(fsm_db_path: str) -> None:
+    while True:
+        await asyncio.sleep(1800)
+        try:
+            await asyncio.to_thread(_maintain_bot_storage, fsm_db_path)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+
+
 async def main():
     """الدالة الرئيسية لتشغيل البوت وموزع المهام اللحظي"""
     logger.info("==================================================")
@@ -75,8 +125,12 @@ async def main():
 
     # 3. تهيئة وبدء مستمع الأحداث الفوري (Real-Time WebSocket & Fallback Notifier)
     notifier = RealTimeNotifier(bot)
+    maintenance_task: asyncio.Task | None = None
 
     async def on_startup():
+        nonlocal maintenance_task
+        await asyncio.to_thread(_maintain_bot_storage, fsm_db_path)
+        maintenance_task = asyncio.create_task(_bot_storage_maintenance_loop(fsm_db_path))
         logger.info("🚀 تشغيل خيط الاستماع اللحظي للأحداث وموزع الـ PDF...")
         await notifier.start()
 
@@ -168,6 +222,12 @@ async def main():
 
     async def on_shutdown():
         logger.info("🛑 إيقاف مستمع الأحداث وجلسة البوت...")
+        if maintenance_task and not maintenance_task.done():
+            maintenance_task.cancel()
+            try:
+                await maintenance_task
+            except asyncio.CancelledError:
+                pass
         await notifier.stop()
         await storage.close()
         await bot.session.close()

@@ -537,19 +537,42 @@ def save_optimized_pdf(
         save_options["user_pw"] = str(user_pw)
         save_options["owner_pw"] = str(owner_pw or user_pw)
 
+    import errno
+    from app.worker import ensure_disk_headroom, safe_remove_file
+
+    min_headroom = max(40.0, float(os.getenv("ZPACT_STAMP_MIN_FREE_MB", "40")))
+    ok_disk, free_mb = ensure_disk_headroom(min_free_mb=min_headroom, hard_min_mb=12.0)
+    if not ok_disk:
+        raise OSError(
+            errno.ENOSPC,
+            f"مساحة القرص على السيرفر ممتلئة ({free_mb:.1f} MB متبقية فقط) — تعذر حفظ الملف المختوم.",
+        )
+
+    out_dir = os.path.dirname(os.path.abspath(output_path))
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    tmp_output_path = f"{output_path}.tmp.pdf"
+    safe_remove_file(tmp_output_path)
+
     try:
-        doc.save(output_path, **save_options)
-    except TypeError:
-        fallback_options = {
-            "garbage": 1 if (fast_batch or LOW_CPU_MODE) else (4 if compress else 0),
-            "deflate": compress,
-            "clean": False if (fast_batch or LOW_CPU_MODE) else True,
-        }
-        if is_encrypted and user_pw:
-            fallback_options["encryption"] = fitz.PDF_ENCRYPT_AES_256
-            fallback_options["user_pw"] = str(user_pw)
-            fallback_options["owner_pw"] = str(owner_pw or user_pw)
-        doc.save(output_path, **fallback_options)
+        try:
+            doc.save(tmp_output_path, **save_options)
+        except TypeError:
+            safe_remove_file(tmp_output_path)
+            fallback_options = {
+                "garbage": 1 if (fast_batch or LOW_CPU_MODE) else (4 if compress else 0),
+                "deflate": compress,
+                "clean": False if (fast_batch or LOW_CPU_MODE) else True,
+            }
+            if is_encrypted and user_pw:
+                fallback_options["encryption"] = fitz.PDF_ENCRYPT_AES_256
+                fallback_options["user_pw"] = str(user_pw)
+                fallback_options["owner_pw"] = str(owner_pw or user_pw)
+            doc.save(tmp_output_path, **fallback_options)
+
+        os.replace(tmp_output_path, output_path)
+    finally:
+        safe_remove_file(tmp_output_path)
 
 
 def _resolve_asset_path(rel_or_abs_path: Optional[str], subfolder: str = "frames") -> Optional[str]:

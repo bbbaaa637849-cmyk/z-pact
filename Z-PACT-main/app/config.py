@@ -25,7 +25,7 @@ def _detect_volume_root() -> Optional[str]:
     """اكتشاف مجلد الـ Volume الدائم على السحابة (Railway) عند توفره وقابليته للكتابة."""
     if os.name == "nt":
         return None
-    for candidate in (os.getenv("RAILWAY_VOLUME_MOUNT_PATH"), "/.data"):
+    for candidate in (os.getenv("RAILWAY_VOLUME_MOUNT_PATH"), "/.data", "/data"):
         if candidate and os.path.isdir(candidate) and os.access(candidate, os.W_OK):
             return os.path.abspath(candidate)
     return None

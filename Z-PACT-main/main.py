@@ -394,10 +394,20 @@ async def receive_sms(request: Request, db: Session = Depends(get_db)):
 def run_database_backup():
     """وظيفة لأخذ نسخة احتياطية من قاعدة البيانات"""
     from app.logger import logger
+    from app.worker import MAX_DB_BACKUPS, ensure_disk_headroom, safe_remove_file
     try:
         db_path = settings.DATABASE_PATH
         if not os.path.exists(db_path):
             logger.error(f"❌ Backup failed: Database not found at {db_path}")
+            return
+
+        db_size_mb = os.path.getsize(db_path) / (1024.0 * 1024.0)
+        ok_disk, free_mb = ensure_disk_headroom(
+            min_free_mb=max(45.0, db_size_mb * 2.0 + 20.0),
+            hard_min_mb=max(20.0, db_size_mb + 10.0),
+        )
+        if not ok_disk:
+            logger.warning(f"⚠️ Backup skipped cleanly: low disk space ({free_mb:.1f}MB free)")
             return
 
         backup_dir = os.path.join(settings.STORAGE_DIR, "backups")
@@ -408,15 +418,19 @@ def run_database_backup():
         backup_path = os.path.join(backup_dir, backup_filename)
 
         import sqlite3
-        with sqlite3.connect(db_path, timeout=30.0) as src_conn, sqlite3.connect(backup_path) as dst_conn:
-            src_conn.backup(dst_conn)
+        try:
+            with sqlite3.connect(db_path, timeout=30.0) as src_conn, sqlite3.connect(backup_path) as dst_conn:
+                src_conn.backup(dst_conn)
+        except Exception:
+            safe_remove_file(backup_path)
+            raise
         logger.info(f"✅ Automated consistent SQLite backup created: {backup_filename}")
         
-        # Keep only last 10 backups
+        # الاحتفاظ بآخر 3 نسخ احتياطية فقط لتوفير مساحة القرص السحابية
         backups = sorted([f for f in os.listdir(backup_dir) if f.endswith(".db")])
-        if len(backups) > 10:
-            for old_backup in backups[:-10]:
-                os.remove(os.path.join(backup_dir, old_backup))
+        if len(backups) > MAX_DB_BACKUPS:
+            for old_backup in backups[:-MAX_DB_BACKUPS]:
+                safe_remove_file(os.path.join(backup_dir, old_backup))
                 logger.info(f"🗑️ Deleted old backup: {old_backup}")
                 
     except Exception as e:

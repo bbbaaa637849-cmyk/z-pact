@@ -373,6 +373,8 @@ class RealTimeNotifier:
             self._processed_orders.add(order_code)
             logger.info(f"🎉 [Notifier] تم تسليم الملف {order_code} بنجاح إلى المحادثة {chat_id}!")
             await bridge_client.admin_order_action(order_code, action="deliver", admin_notes="Delivered via Telegram Bot")
+            if str(order_code or "").startswith("BAT-"):
+                await bridge_client.cleanup_order_pdf(order_code)
 
             # إشعار حسابات الإدارة بالتسليم
             admin_msg = (

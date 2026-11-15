@@ -510,14 +510,22 @@ async def _execute_vip_direct_stamp(target_msg: Message, state: FSMContext, user
         "is_admin": True,
     })
     if not res.get("ok"):
-        await status_msg.edit_text(f"⚠️ فشل الختم: {html.escape(str(res.get('error', '')))}", parse_mode="HTML")
+        err_text = f"⚠️ فشل الختم: {html.escape(str(res.get('error', '')))}"
+        try:
+            await status_msg.edit_text(err_text, parse_mode="HTML")
+        except Exception:
+            await target_msg.answer(err_text, parse_mode="HTML")
         return
 
     info = res["data"]
     order_code = info.get("order_code")
     pdf_bytes = await bridge_client.download_order_pdf(order_code)
     if not pdf_bytes:
-        await status_msg.edit_text("⚠️ تم الختم ولكن تعذر تنزيل الملف من السيرفر.")
+        err_text = "⚠️ تم الختم ولكن تعذر تنزيل الملف من السيرفر."
+        try:
+            await status_msg.edit_text(err_text)
+        except Exception:
+            await target_msg.answer(err_text)
         return
 
     disp_name = name or (series or "") or phone or "بدون اسم"
@@ -534,6 +542,7 @@ async def _execute_vip_direct_stamp(target_msg: Message, state: FSMContext, user
         ),
         parse_mode="HTML",
     )
+    await bridge_client.cleanup_order_pdf(order_code)
     try:
         await status_msg.delete()
     except Exception:

@@ -1769,6 +1769,213 @@ class TestIsolatedMobileStudioBridgeAPI(unittest.TestCase):
         finally:
             db2.close()
 
+    def test_19_post_delivery_batch_cleanup_and_path_safety(self):
+        """التحقق من حذف ملفات BAT-* المؤقتة بعد التسليم عبر API دون المساس بالمذكرات الأصلية."""
+        import app.worker as worker_mod
+        from app.models import Material, BotOrder, Purchase
+        from main import RATE_LIMIT_STORE
+        RATE_LIMIT_STORE.clear()
+
+        up = self.client.post(
+            "/api/internal/admin/materials/upload",
+            headers=self.headers,
+            files={"file": ("cleanup_test.pdf", _make_sample_pdf_bytes(2), "application/pdf")},
+            data={"title": "مذكرة اختبار التنظيف", "tag": "عام", "price": "10"},
+        )
+        self.assertEqual(up.status_code, 200, up.text)
+        mat_id = up.json()["id"]
+
+        orig_worker_stamped = worker_mod.STAMPED_DIR
+        worker_mod.STAMPED_DIR = stamper_mod.OUTPUT_DIR
+        try:
+            stamp_res = self.client.post(
+                "/api/internal/orders/direct-stamp-sync",
+                headers=self.headers,
+                json={
+                    "material_id": mat_id,
+                    "buyer_name_stamp": "أ/ حسام التنظيف",
+                    "buyer_phone_stamp": "01077778888",
+                },
+            )
+            self.assertEqual(stamp_res.status_code, 200, stamp_res.text)
+            info = stamp_res.json()
+            order_code = info["order_code"]
+            purchase_id = info["purchase_id"]
+
+            dl = self.client.get(f"/api/internal/orders/{order_code}/download", headers=self.headers)
+            self.assertEqual(dl.status_code, 200)
+            self.assertGreater(len(dl.content), 200)
+
+            db_chk = self.TestingSession()
+            try:
+                mat = db_chk.query(Material).filter(Material.id == mat_id).first()
+                orig_abs = settings.resolve_storage_path(mat.original_pdf_path, "originals")
+                p_row = db_chk.query(Purchase).filter(Purchase.id == purchase_id).first()
+                stamped_abs = p_row.output_pdf_path
+            finally:
+                db_chk.close()
+
+            self.assertTrue(os.path.exists(orig_abs))
+            self.assertTrue(os.path.exists(stamped_abs))
+
+            clean_res = self.client.post(
+                f"/api/internal/orders/{order_code}/cleanup-file",
+                headers=self.headers,
+            )
+            self.assertEqual(clean_res.status_code, 200, clean_res.text)
+            self.assertEqual(clean_res.json()["status"], "cleaned")
+            self.assertFalse(os.path.exists(stamped_abs))
+            self.assertTrue(os.path.exists(orig_abs))
+
+            # حماية أمنية: رفض حذف أي مسار يشير خارج مجلد stamped (مثل originals)
+            db_sec = self.TestingSession()
+            try:
+                o_row = db_sec.query(BotOrder).filter(BotOrder.order_code == order_code).first()
+                o_row.stamped_pdf_path = orig_abs
+                db_sec.commit()
+            finally:
+                db_sec.close()
+
+            sec_res = self.client.post(
+                f"/api/internal/orders/{order_code}/cleanup-file",
+                headers=self.headers,
+            )
+            self.assertEqual(sec_res.status_code, 200)
+            self.assertEqual(sec_res.json()["status"], "skipped")
+            self.assertTrue(os.path.exists(orig_abs))
+        finally:
+            worker_mod.STAMPED_DIR = orig_worker_stamped
+
+    def test_20_worker_cleanup_ephemeral_and_low_disk_preserves_assets(self):
+        """التحقق من تنظيف المعاينات والنسخ الزائدة وإخلاء الأقدم عند الضغط مع حفظ الأصول."""
+        import time
+        from unittest.mock import patch
+        import app.worker as worker_mod
+
+        orig_worker_stamped = worker_mod.STAMPED_DIR
+        worker_mod.STAMPED_DIR = stamper_mod.OUTPUT_DIR
+        try:
+            previews_dir = os.path.join(settings.STORAGE_DIR, "previews")
+            tmp_dir = os.path.join(settings.STORAGE_DIR, "bot_tmp")
+            backups_dir = os.path.join(settings.STORAGE_DIR, "backups")
+            originals_dir = os.path.join(settings.STORAGE_DIR, "originals")
+            for d in (previews_dir, tmp_dir, backups_dir, originals_dir, stamper_mod.OUTPUT_DIR):
+                os.makedirs(d, exist_ok=True)
+
+            important_orig = os.path.join(originals_dir, "keep_original.pdf")
+            old_preview = os.path.join(previews_dir, "old_prev.png")
+            old_tmp = os.path.join(tmp_dir, "old_up.pdf")
+            old_stamped = os.path.join(stamper_mod.OUTPUT_DIR, "old_delivered.pdf")
+            fresh_stamped = os.path.join(stamper_mod.OUTPUT_DIR, "fresh_active.pdf")
+
+            for p, content in (
+                (important_orig, b"%PDF-1.4 ORIGINAL"),
+                (old_preview, b"PNGDATA"),
+                (old_tmp, b"TMPDATA"),
+                (old_stamped, b"OLDSTAMPED"),
+                (fresh_stamped, b"FRESHSTAMPED"),
+            ):
+                with open(p, "wb") as f:
+                    f.write(content)
+
+            past = time.time() - (2 * 3600)
+            for p in (important_orig, old_preview, old_tmp, old_stamped):
+                os.utime(p, (past, past))
+
+            # إنشاء 5 نسخ احتياطية واختبار تقليصها لآخر MAX_DB_BACKUPS (3)
+            for idx in range(5):
+                bp = os.path.join(backups_dir, f"backup_2026110{idx}_000000.db")
+                with open(bp, "wb") as f:
+                    f.write(b"SQLITEBACKUP")
+
+            res = worker_mod.clean_stamped_files()
+            self.assertFalse(os.path.exists(old_preview))
+            self.assertFalse(os.path.exists(old_tmp))
+            self.assertTrue(os.path.exists(important_orig))
+            self.assertTrue(os.path.exists(fresh_stamped))
+            remaining_backups = sorted(os.listdir(backups_dir))
+            self.assertEqual(len(remaining_backups), worker_mod.MAX_DB_BACKUPS)
+            self.assertGreaterEqual(res["deleted_files"], 4)
+
+            # محاكاة امتلاء القرص: يحذف أقدم stamped فوق 120 ثانية مع بقاء الملف الطازج والأصل
+            with patch.object(
+                worker_mod,
+                "get_disk_free_mb",
+                side_effect=lambda *args, **kwargs: 150.0 if not os.path.exists(old_stamped) else 10.0,
+            ):
+                ok_disk, _ = worker_mod.ensure_disk_headroom(min_free_mb=120.0, hard_min_mb=20.0)
+            self.assertTrue(ok_disk)
+            self.assertFalse(os.path.exists(old_stamped))
+            self.assertTrue(os.path.exists(fresh_stamped))
+            self.assertTrue(os.path.exists(important_orig))
+        finally:
+            worker_mod.STAMPED_DIR = orig_worker_stamped
+
+    def test_21_bot_batch_document_handler_handles_fsm_disk_full_without_edit_crash(self):
+        """التحقق من عدم حذف wait_msg قبل _prepare_and_show_batch_review عند حدوث خطأ في SQLite FSM."""
+        import asyncio
+        import sqlite3
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+        import bot_service.handlers.admin_studio as studio_mod
+
+        call_order = []
+
+        async def _delete_spy():
+            call_order.append("delete")
+
+        async def _edit_spy(text, parse_mode=None):
+            call_order.append(("edit", text))
+
+        wait_msg = SimpleNamespace(delete=_delete_spy, edit_text=_edit_spy)
+        answer_calls = []
+
+        async def _msg_answer(text, **kwargs):
+            if "جاري قراءة" in text:
+                return wait_msg
+            answer_calls.append(text)
+            return SimpleNamespace()
+
+        fake_msg = SimpleNamespace(
+            from_user=SimpleNamespace(id=8287744705),
+            bot=SimpleNamespace(),
+            document=SimpleNamespace(file_id="doc_1", file_name="teachers.txt"),
+            caption="",
+            answer=_msg_answer,
+        )
+        fake_state = SimpleNamespace()
+
+        async def _failing_prepare(*args, **kwargs):
+            call_order.append("prepare")
+            raise sqlite3.OperationalError("database or disk is full")
+
+        async def _run():
+            with (
+                patch.object(studio_mod, "_download_telegram_bytes", AsyncMock(return_value="أحمد | 01012345678".encode("utf-8"))),
+                patch.object(studio_mod, "_prepare_and_show_batch_review", _failing_prepare),
+            ):
+                await studio_mod.handle_idle_admin_batch_document(fake_msg, fake_state)
+
+        asyncio.run(_run())
+        self.assertEqual(call_order[0], "prepare")
+        self.assertNotIn("delete", call_order)
+        self.assertEqual(call_order[1][0], "edit")
+        self.assertIn("database or disk is full", call_order[1][1])
+        self.assertEqual(answer_calls, [])
+
+        # التحقق أيضاً من السقوط الآمن إلى fallback_msg.answer إذا تعذر تعديل wait_msg
+        fallback_sent = []
+
+        async def _broken_edit(text, parse_mode=None):
+            raise RuntimeError("Bad Request: message to edit not found")
+
+        async def _fallback_answer(text, **kwargs):
+            fallback_sent.append(text)
+
+        broken_wait = SimpleNamespace(edit_text=_broken_edit)
+        fallback_msg = SimpleNamespace(answer=_fallback_answer)
+        asyncio.run(studio_mod._safe_report_wait_error(broken_wait, fallback_msg, "خطأ تجريبي"))
+        self.assertEqual(fallback_sent, ["خطأ تجريبي"])
 
 
 if __name__ == "__main__":

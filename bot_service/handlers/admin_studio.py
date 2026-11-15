@@ -385,6 +385,34 @@ async def _send_batch_summary_card(target_msg: Message, state_data: Dict[str, An
     await target_msg.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
+async def _safe_delete_message(msg: Optional[Message]) -> None:
+    """حذف رسالة انتظار بأمان دون كسر التدفق إذا كانت محذوفة بالفعل."""
+    if msg is None:
+        return
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+
+
+async def _safe_report_wait_error(
+    wait_msg: Optional[Message],
+    fallback_msg: Message,
+    text: str,
+) -> None:
+    """تعديل رسالة الانتظار بالخطأ أو إرسال رسالة جديدة إذا تعذر التعديل."""
+    if wait_msg is not None:
+        try:
+            await wait_msg.edit_text(text, parse_mode="HTML")
+            return
+        except Exception:
+            pass
+    try:
+        await fallback_msg.answer(text, parse_mode="HTML")
+    except Exception as send_err:
+        logger.warning(f"⚠️ تعذر إرسال تنبيه الخطأ للمشرف: {send_err}")
+
+
 # استقبال ملف Excel/Word/CSV/TXT تلقائياً من الأدمن في الحالة الافتراضية أو أثناء جلسة الدفعات
 @router.message(
     StateFilter(None, AdminBatchStampStates.waiting_batch_text, AdminBatchStampStates.reviewing_batch),
@@ -411,10 +439,15 @@ async def handle_idle_admin_batch_document(message: Message, state: FSMContext):
             file_bytes,
             is_admin=_is_admin(message.from_user.id),
         )
-        await wait_msg.delete()
         await _prepare_and_show_batch_review(message, state, entries, label)
+        await _safe_delete_message(wait_msg)
     except Exception as e:
-        await wait_msg.edit_text(f"⚠️ تعذر قراءة الملف: {html.escape(str(e))}", parse_mode="HTML")
+        logger.exception(f"❌ [Batch Document] تعذر قراءة أو تجهيز الملف: {e}")
+        await _safe_report_wait_error(
+            wait_msg,
+            message,
+            f"⚠️ تعذر قراءة الملف: {html.escape(str(e))}",
+        )
 
 
 @router.message(StateFilter(None), F.photo)
@@ -847,6 +880,8 @@ async def handle_batch_execute_sequential(callback: CallbackQuery, state: FSMCon
                         parse_mode="HTML",
                     )
                     ok_count += 1
+                    # حذف النسخة المؤقتة على السيرفر فور استلامها بنجاح في التيليجرام لمنع امتلاء القرص
+                    await bridge_client.cleanup_order_pdf(order_code)
                 except Exception as send_err:
                     fail_lines.append(f"#{item.get('idx')} {disp_name}: خطأ إرسال ({send_err})")
                 finally:

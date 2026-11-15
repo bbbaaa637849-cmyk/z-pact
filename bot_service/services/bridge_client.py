@@ -199,6 +199,20 @@ class BridgeClient:
                 logger.error(f"❌ [Bridge Exception] download_order_pdf: {e}")
                 return None
 
+    async def cleanup_order_pdf(self, order_code: str) -> bool:
+        """حذف نسخة الـ PDF المؤقتة على السيرفر فور تأكيد استلامها وإرسالها للتيليجرام."""
+        if not order_code:
+            return False
+        url = f"{self.base_url}/internal/orders/{order_code}/cleanup-file"
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                res = await client.post(url, headers=self.headers)
+                return res.status_code == 200
+            except Exception as e:
+                logger.debug(f"[Bridge] cleanup_order_pdf skipped for {order_code}: {e}")
+                return False
+
     # -------------------------------------------------------------
     # 5. لوحة تحكم الأدمن والرسائل
     # -------------------------------------------------------------
