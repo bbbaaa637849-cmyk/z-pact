@@ -59,6 +59,7 @@ class AdminMaterialManageStates(StatesGroup):
     waiting_material_cover = State()
     waiting_material_frame = State()
     waiting_frame_image = State()
+    waiting_replace_pdf = State()
 
 class AdminFontSettingsStates(StatesGroup):
     """حالات ضبط الخطوط والأحجام والإحداثيات للمذكرة من البوت"""

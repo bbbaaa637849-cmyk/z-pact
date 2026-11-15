@@ -584,6 +584,122 @@ class TestZPACTComprehensiveSuite(unittest.TestCase):
         self.assertEqual(len(data_list["reviews"]), 1)
         self.assertEqual(data_list["reviews"][0]["comment"], "مذكرة ممتازة وتنسيق رائع")
 
+    def test_09_patch_material_replace_pdf_preserves_metadata_and_stamps(self):
+        """اختبار استبدال ملف الـ PDF عبر PATCH /api/materials/{id} مع الحفاظ على البيانات والأختام."""
+        import fitz
+        from app.config import settings
+
+        admin_user = self.db.query(User).filter(User.role == UserRole.ADMIN).first()
+        admin_token = create_access_token(user_id=admin_user.id, role=admin_user.role.value)
+        admin_headers = {"Authorization": f"Bearer {admin_token}"}
+
+        old_doc = fitz.open()
+        for i in range(2):
+            p = old_doc.new_page(width=595, height=842)
+            p.insert_text((72, 120), f"Old Draft Page {i + 1}", fontsize=15)
+        old_bytes = old_doc.tobytes()
+        old_doc.close()
+
+        created_paths = []
+        try:
+            up_res = self.client.post(
+                "/api/materials/",
+                headers=admin_headers,
+                data={
+                    "title": "مذكرة الاستبدال ويب",
+                    "tag": "كيمياء",
+                    "description": "وصف ثابت لا يتغير",
+                    "price": "30",
+                    "price_coins": "30",
+                    "compression_enabled": "true",
+                },
+                files={"pdf_file": ("draft_v1.pdf", old_bytes, "application/pdf")},
+            )
+            self.assertEqual(up_res.status_code, 201, up_res.text)
+            mat_json = up_res.json()
+            mat_id = mat_json["id"]
+            cover_path = mat_json.get("cover_image_path")
+            if cover_path:
+                cov_abs = settings.resolve_storage_path(cover_path, "covers")
+                if cov_abs:
+                    created_paths.append(cov_abs)
+
+            self.db.expire_all()
+            mat_row = self.db.query(Material).filter(Material.id == mat_id).first()
+            old_portable = mat_row.original_pdf_path
+            old_abs = settings.resolve_storage_path(old_portable, "originals")
+            if old_abs:
+                created_paths.append(old_abs)
+            self.assertEqual(mat_json["total_pages"], 2)
+            self.assertTrue(old_abs and os.path.exists(old_abs))
+
+            saved_elements = [
+                {"type": "name", "page": None, "x_pct": 21.5, "y_pct": 31.5, "font_size": 15, "font_family": "cairo"},
+                {"type": "phone", "page": None, "x_pct": 78.5, "y_pct": 81.5, "font_size": 13, "font_family": "cairo"},
+            ]
+            layout = StampLayout(
+                material_id=mat_id,
+                created_by=admin_user.id,
+                layout_type=LayoutType.DEFAULT,
+                stamp_elements=saved_elements,
+            )
+            self.db.add(layout)
+            self.db.commit()
+
+            new_doc = fitz.open()
+            for i in range(3):
+                p = new_doc.new_page(width=595, height=842)
+                p.insert_text((72, 120), f"Repaired Content Page {i + 1}", fontsize=15)
+            new_bytes = new_doc.tobytes()
+            new_doc.close()
+
+            patch_res = self.client.patch(
+                f"/api/materials/{mat_id}",
+                headers=admin_headers,
+                data={"title": "مذكرة الاستبدال محدثة"},
+                files={"pdf_file": ("repaired_v2.pdf", new_bytes, "application/pdf")},
+            )
+            self.assertEqual(patch_res.status_code, 200, patch_res.text)
+            updated = patch_res.json()
+            self.db.expire_all()
+            mat_row_after = self.db.query(Material).filter(Material.id == mat_id).first()
+            new_portable = mat_row_after.original_pdf_path
+            new_abs = settings.resolve_storage_path(new_portable, "originals")
+            if new_abs:
+                created_paths.append(new_abs)
+
+            self.assertEqual(updated["total_pages"], 3)
+            self.assertEqual(updated["title"], "مذكرة الاستبدال محدثة")
+            self.assertEqual(updated["tag"], "كيمياء")
+            self.assertEqual(updated["description"], "وصف ثابت لا يتغير")
+            self.assertEqual(updated.get("cover_image_path"), cover_path)
+            self.assertEqual(float(updated["price"]), 30.0)
+            self.assertEqual(float(updated["price_coins"]), 30.0)
+            self.assertNotEqual(new_portable, old_portable)
+            self.assertTrue(new_abs and os.path.exists(new_abs))
+            self.assertFalse(os.path.exists(old_abs))
+
+            # التحقق من رفض ملف غير صالح والحفاظ على النسخة السليمة
+            bad_patch = self.client.patch(
+                f"/api/materials/{mat_id}",
+                headers=admin_headers,
+                files={"pdf_file": ("bad.txt", b"invalid", "text/plain")},
+            )
+            self.assertEqual(bad_patch.status_code, 400)
+            self.assertTrue(os.path.exists(new_abs))
+
+            self.db.expire_all()
+            persisted_layout = self.db.query(StampLayout).filter(StampLayout.material_id == mat_id).first()
+            self.assertIsNotNone(persisted_layout)
+            self.assertEqual(persisted_layout.stamp_elements, saved_elements)
+        finally:
+            for pth in created_paths:
+                if pth and os.path.exists(pth):
+                    try:
+                        os.remove(pth)
+                    except OSError:
+                        pass
+
 
 if __name__ == "__main__":
     unittest.main()

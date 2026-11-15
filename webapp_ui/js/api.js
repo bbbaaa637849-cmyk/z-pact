@@ -299,6 +299,26 @@ Object.assign(ApiService.prototype, {
     }
   },
 
+  async replaceMaterialPdf(materialId, file) {
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const res = await fetch(`${this.baseUrl}/api/internal/admin/materials/${materialId}/replace-pdf`, {
+        method: "POST",
+        headers: { "X-Internal-Service-Key": this.serviceKey },
+        body: formData
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || `HTTP error ${res.status}`);
+      }
+      return await res.json();
+    } catch (err) {
+      console.error("❌ Failed to replace material PDF:", err);
+      return { error: err.message };
+    }
+  },
+
   async fetchPreviewPageBlobUrl(materialId, page = 1, stamped = 0, zoom = 1.35) {
     try {
       const params = new URLSearchParams({

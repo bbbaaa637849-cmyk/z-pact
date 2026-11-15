@@ -1608,6 +1608,167 @@ class TestIsolatedMobileStudioBridgeAPI(unittest.TestCase):
         finally:
             db2.close()
 
+    def test_18_replace_material_pdf_preserves_metadata_stamps_and_frame(self):
+        """التحقق من استبدال ملف الـ PDF الأصلي مع الاحتفاظ بنفس البيانات والإطار وإحداثيات وأحجام الأختام."""
+        from app.models import Material, StampLayout, Purchase
+
+        old_doc = fitz.open()
+        for i in range(2):
+            p = old_doc.new_page(width=595, height=842)
+            p.insert_text((72, 120), f"Old Broken Booklet Page {i + 1}", fontsize=16)
+        old_bytes = old_doc.tobytes()
+        old_doc.close()
+
+        up_res = self.client.post(
+            "/api/internal/admin/materials/upload",
+            headers=self.headers,
+            data={
+                "title": "مذكرة الفيزياء الأصلية",
+                "tag": "الفيزياء",
+                "description": "وصف محفوظ لا يتغير",
+                "price": "45",
+                "price_coins": "45",
+                "compression_enabled": "true",
+            },
+            files={"file": ("broken_v1.pdf", old_bytes, "application/pdf")},
+        )
+        self.assertEqual(up_res.status_code, 200, up_res.text)
+        mat_data = up_res.json()
+        mat_id = mat_data["id"]
+        self.assertEqual(mat_data["total_pages"], 2)
+        db_init = self.TestingSession()
+        try:
+            old_portable = db_init.query(Material).filter(Material.id == mat_id).first().original_pdf_path
+        finally:
+            db_init.close()
+        old_abs = settings.resolve_storage_path(old_portable, "originals")
+        self.assertTrue(old_abs and os.path.exists(old_abs))
+
+        custom_elements = [
+            {"type": "doc_name", "x_pct": 50.0, "y_pct": 14.0, "font_size": 22, "color": "#0F172A", "font_family": "cairo", "is_bold": True, "page": 1, "excluded_pages": [], "opacity": 1.0, "rotation": 0},
+            {"type": "name", "x_pct": 33.3, "y_pct": 44.4, "font_size": 17, "color": "#0D47A1", "font_family": "cairo", "page": 0, "excluded_pages": [1], "opacity": 0.95, "rotation": 0},
+            {"type": "phone", "x_pct": 66.6, "y_pct": 77.7, "font_size": 13, "color": "#0D47A1", "font_family": "cairo", "page": 0, "excluded_pages": [1], "opacity": 0.95, "rotation": 0},
+        ]
+        layout_res = self.client.put(
+            f"/api/internal/admin/materials/{mat_id}/layout",
+            headers=self.headers,
+            json={"layout_type": "default_text", "stamp_elements": custom_elements},
+        )
+        self.assertEqual(layout_res.status_code, 200, layout_res.text)
+
+        frame_res = self.client.post(
+            f"/api/internal/admin/materials/{mat_id}/frame",
+            headers=self.headers,
+            files={"frame_image": ("frame.png", _make_bordered_white_frame_png_bytes(), "image/png")},
+        )
+        self.assertEqual(frame_res.status_code, 200, frame_res.text)
+        saved_frame_path = frame_res.json().get("page_frame_path")
+        self.assertTrue(saved_frame_path)
+
+        # تحميل الأصل قبل الاستبدال
+        dl_old = self.client.get(f"/api/internal/admin/materials/{mat_id}/original", headers=self.headers)
+        self.assertEqual(dl_old.status_code, 200)
+        with fitz.open(stream=dl_old.content, filetype="pdf") as d_old:
+            self.assertEqual(len(d_old), 2)
+            self.assertIn("Old Broken Booklet Page 2", d_old[1].get_text("text"))
+
+        # رفض ملف غير صالح مع بقاء الأصل سليماً
+        bad_rep = self.client.post(
+            f"/api/internal/admin/materials/{mat_id}/replace-pdf",
+            headers=self.headers,
+            files={"file": ("not_pdf.txt", b"not a pdf", "text/plain")},
+        )
+        self.assertEqual(bad_rep.status_code, 400)
+        self.assertTrue(os.path.exists(old_abs))
+
+        # رفع ملف الـ PDF الجديد (4 صفحات)
+        new_doc = fitz.open()
+        for i in range(4):
+            p = new_doc.new_page(width=595, height=842)
+            p.insert_text((72, 120), f"Fixed Clean Booklet Page {i + 1}", fontsize=16)
+        new_bytes = new_doc.tobytes()
+        new_doc.close()
+
+        rep_res = self.client.post(
+            f"/api/internal/admin/materials/{mat_id}/replace-pdf",
+            headers=self.headers,
+            files={"file": ("fixed_v2.pdf", new_bytes, "application/pdf")},
+        )
+        self.assertEqual(rep_res.status_code, 200, rep_res.text)
+        rep_json = rep_res.json()
+        self.assertEqual(rep_json["id"], mat_id)
+        self.assertEqual(rep_json["total_pages"], 4)
+        self.assertEqual(rep_json["title"], "مذكرة الفيزياء الأصلية")
+        self.assertEqual(rep_json["tag"], "الفيزياء")
+        self.assertEqual(rep_json["description"], "وصف محفوظ لا يتغير")
+        self.assertEqual(float(rep_json["price"]), 45.0)
+        self.assertEqual(float(rep_json["price_coins"]), 45.0)
+        self.assertEqual(rep_json["page_frame_path"], saved_frame_path)
+
+        db_chk = self.TestingSession()
+        try:
+            mat_chk = db_chk.query(Material).filter(Material.id == mat_id).first()
+            new_portable = mat_chk.original_pdf_path
+        finally:
+            db_chk.close()
+        self.assertNotEqual(new_portable, old_portable)
+
+        new_abs = settings.resolve_storage_path(new_portable, "originals")
+        self.assertTrue(new_abs and os.path.exists(new_abs))
+        self.assertFalse(os.path.exists(old_abs))
+
+        # تحميل الأصل بعد الاستبدال يعيد النسخة الجديدة
+        dl_new = self.client.get(f"/api/internal/admin/materials/{mat_id}/original", headers=self.headers)
+        self.assertEqual(dl_new.status_code, 200)
+        with fitz.open(stream=dl_new.content, filetype="pdf") as d_new:
+            self.assertEqual(len(d_new), 4)
+            self.assertIn("Fixed Clean Booklet Page 4", d_new[3].get_text("text"))
+
+        # إحداثيات الأختام وعدد الصفحات والإطار محفوظة عبر /layout وفي قاعدة البيانات
+        lay_after = self.client.get(f"/api/internal/admin/materials/{mat_id}/layout", headers=self.headers)
+        self.assertEqual(lay_after.status_code, 200)
+        lay_json = lay_after.json()
+        self.assertEqual(lay_json["material"]["total_pages"], 4)
+        self.assertEqual(lay_json["material"]["page_frame_path"], saved_frame_path)
+        els_by_type = {el["type"]: el for el in lay_json["stamp_elements"]}
+        self.assertAlmostEqual(els_by_type["name"]["x_pct"], 33.3, places=1)
+        self.assertAlmostEqual(els_by_type["name"]["y_pct"], 44.4, places=1)
+        self.assertEqual(els_by_type["name"]["font_size"], 17)
+        self.assertAlmostEqual(els_by_type["phone"]["x_pct"], 66.6, places=1)
+        self.assertAlmostEqual(els_by_type["phone"]["y_pct"], 77.7, places=1)
+
+        # الختم المباشر بعد الاستبدال يختم على الصفحات الجديدة بنفس الإحداثيات
+        from main import RATE_LIMIT_STORE
+        RATE_LIMIT_STORE.clear()
+        import unicodedata
+        stamp_res = self.client.post(
+            "/api/internal/orders/direct-stamp-sync",
+            headers=self.headers,
+            json={
+                "material_id": mat_id,
+                "buyer_name_stamp": "كريم عادل",
+                "buyer_phone_stamp": "01055556666",
+                "series_name": "الفيزياء الحديثة",
+            },
+        )
+        self.assertEqual(stamp_res.status_code, 200, stamp_res.text)
+        pid = stamp_res.json()["purchase_id"]
+        db2 = self.TestingSession()
+        try:
+            mat_row = db2.query(Material).filter(Material.id == mat_id).first()
+            self.assertEqual(mat_row.total_pages, 4)
+            layouts = db2.query(StampLayout).filter(StampLayout.material_id == mat_id).all()
+            self.assertEqual(len(layouts), 1)
+            p_row = db2.query(Purchase).filter(Purchase.id == pid).first()
+            with fitz.open(p_row.output_pdf_path) as stamped_doc:
+                self.assertEqual(len(stamped_doc), 4)
+                p4_txt = unicodedata.normalize("NFKC", stamped_doc[3].get_text("text"))
+                self.assertIn("Fixed Clean Booklet Page 4", p4_txt)
+                self.assertIn("كريم", p4_txt)
+                self.assertIn("01055556666", p4_txt)
+        finally:
+            db2.close()
+
 
 
 if __name__ == "__main__":

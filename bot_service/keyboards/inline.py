@@ -201,6 +201,10 @@ def get_admin_material_item_keyboard(
             InlineKeyboardButton(text="🔤 ضبط الخط والأحجام والموقع", callback_data=f"adm_mat_font:{material_id}"),
             InlineKeyboardButton(text="👁️ معاينة صفحة 1", callback_data=f"adm_mat_preview:{material_id}")
         ],
+        [
+            InlineKeyboardButton(text="📥 تحميل الأصل", callback_data=f"adm_mat_dl_orig:{material_id}"),
+            InlineKeyboardButton(text="📄 استبدال ملف الـ PDF", callback_data=f"adm_mat_replace_pdf:{material_id}")
+        ],
         frame_row,
         [
             InlineKeyboardButton(text="💵 تعديل السعر", callback_data=f"adm_mat_price:{material_id}"),

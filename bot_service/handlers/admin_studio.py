@@ -1334,6 +1334,144 @@ async def _send_or_refresh_studio_preview(
         await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb, parse_mode="HTML")
 
 
+@router.callback_query(F.data.startswith("adm_mat_dl_orig:"))
+async def handle_mat_download_original(callback: CallbackQuery):
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("غير مصرح", show_alert=True)
+        return
+    mat_id = int(callback.data.split(":")[1])
+    await callback.answer("⏳ جاري سحب الملف الأصلي من السيرفر...")
+    res = await bridge_client.download_material_original(mat_id)
+    if not res or not res.get("bytes"):
+        await callback.message.answer("❌ تعذر تحميل الملف الأصلي لهذه المذكرة من السيرفر.")
+        return
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📄 رفع ملف PDF بديل لهذه المذكرة", callback_data=f"adm_mat_replace_pdf:{mat_id}")],
+        [InlineKeyboardButton(text="🔙 رجوع لتفاصيل المذكرة", callback_data=f"adm_mat_sel:{mat_id}")],
+    ])
+    await callback.message.answer_document(
+        document=BufferedInputFile(res["bytes"], filename=res["filename"]),
+        caption=(
+            f"📥 <b>الملف الأصلي للمذكرة (#{mat_id})</b>\n"
+            "بعد إصلاح الملف أو تعديله تقدر تضغط على <b>📄 رفع ملف PDF بديل</b> ليتم استبداله مع الحفاظ على نفس البيانات وأماكن وأحجام الأختام."
+        ),
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("adm_mat_replace_pdf:"))
+async def handle_mat_replace_pdf_start(callback: CallbackQuery, state: FSMContext):
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("غير مصرح", show_alert=True)
+        return
+    mat_id = int(callback.data.split(":")[1])
+    materials = await bridge_client.get_materials(include_unpublished=True)
+    mat = next((m for m in materials if int(m.get("id", 0)) == mat_id), None)
+    mat_title = mat.get("title") if mat else f"#{mat_id}"
+
+    await state.set_state(AdminMaterialManageStates.waiting_replace_pdf)
+    await state.update_data(replace_mat_id=mat_id, replace_mat_title=mat_title)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ إلغاء الاستبدال", callback_data=f"adm_mat_replace_cancel:{mat_id}")],
+    ])
+    await callback.message.answer(
+        f"📄 <b>استبدال ملف الـ PDF للمذكرة:</b> <code>{html.escape(str(mat_title))}</code> (#{mat_id})\n\n"
+        "• أرسل الآن <b>ملف الـ PDF الجديد</b> هنا كـ Document.\n"
+        "• سيتم استبدال الملف فقط مع الحفاظ على:\n"
+        "  ✅ نفس الاسم والسعر والوصف والمادة\n"
+        "  ✅ نفس أماكن وأحجام وخطوط الأختام المحفوظة\n"
+        "  ✅ نفس الغلاف وإطار الصفحات",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_mat_replace_cancel:"))
+async def handle_mat_replace_pdf_cancel(callback: CallbackQuery, state: FSMContext):
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("غير مصرح", show_alert=True)
+        return
+    await state.clear()
+    mat_id = int(callback.data.split(":")[1])
+    await callback.message.answer(
+        f"✅ تم إلغاء استبدال الملف للمذكرة #{mat_id}.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 رجوع لتفاصيل المذكرة", callback_data=f"adm_mat_sel:{mat_id}")]
+        ]),
+    )
+    await callback.answer()
+
+
+@router.message(AdminMaterialManageStates.waiting_replace_pdf)
+async def handle_mat_replace_pdf_receive(message: Message, state: FSMContext):
+    if not _is_admin(message.from_user.id):
+        return
+
+    data = await state.get_data()
+    mat_id = int(data.get("replace_mat_id") or 0)
+    mat_title = data.get("replace_mat_title") or f"#{mat_id}"
+
+    if message.text and message.text.strip().lower() in ("إلغاء", "الغاء", "cancel", "/cancel"):
+        await state.clear()
+        await message.answer("✅ تم إلغاء عملية استبدال ملف الـ PDF.")
+        return
+
+    if not message.document:
+        await message.answer("⚠️ يرجى إرسال ملف بصيغة <b>PDF</b> كـ Document أو كتابة <code>إلغاء</code>.", parse_mode="HTML")
+        return
+
+    filename = message.document.file_name or "booklet.pdf"
+    if not filename.lower().endswith(".pdf"):
+        await message.answer("⚠️ يجب أن يكون الملف المرفوع بصيغة <code>.pdf</code> فقط.", parse_mode="HTML")
+        return
+
+    if not mat_id:
+        await state.clear()
+        await message.answer("⚠️ انتهت الجلسة، يرجى إعادة اختيار المذكرة.")
+        return
+
+    wait_msg = await message.answer("⏳ جاري تنزيل ملف الـ PDF الجديد ومعالجته وضغطه مع الحفاظ على كافة الأختام...")
+    try:
+        pdf_bytes = await _download_telegram_bytes(message.bot, message.document.file_id)
+        res = await bridge_client.replace_material_pdf(mat_id, pdf_bytes, filename=filename)
+    except Exception as e:
+        logger.exception("Error downloading/replacing material PDF via Telegram")
+        await wait_msg.edit_text(f"❌ حدث خطأ أثناء استبدال الملف: {html.escape(str(e))}", parse_mode="HTML")
+        return
+
+    if not res.get("ok"):
+        await wait_msg.edit_text(
+            f"❌ تعذر استبدال الملف: {html.escape(str(res.get('error') or 'خطأ غير معروف'))}",
+            parse_mode="HTML",
+        )
+        return
+
+    await state.clear()
+    updated = res.get("data") or {}
+    total_pages = updated.get("total_pages", "؟")
+    actual_title = updated.get("title") or mat_title
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="👁️ معاينة صفحة 1 بالأختام", callback_data=f"adm_mat_preview:{mat_id}"),
+            InlineKeyboardButton(text="🔤 استوديو الخطوط", callback_data=f"adm_mat_font:{mat_id}"),
+        ],
+        [InlineKeyboardButton(text="🔙 تفاصيل المذكرة", callback_data=f"adm_mat_sel:{mat_id}")],
+    ])
+    await wait_msg.edit_text(
+        f"✅ <b>تم استبدال ملف الـ PDF بنجاح!</b>\n"
+        f"📘 المذكرة: <b>{html.escape(str(actual_title))}</b> (#{mat_id})\n"
+        f"📄 عدد الصفحات الجديد: <b>{total_pages}</b> صفحة\n\n"
+        "🔒 تم الحفاظ على نفس البيانات (الاسم/السعر/الوصف/الإطار) ونفس أماكن وأحجام الأختام المحفوظة.",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+
+
 @router.callback_query(F.data == "adm_view:font_settings")
 async def handle_font_settings_pick_material(callback: CallbackQuery):
     if not _is_admin(callback.from_user.id):

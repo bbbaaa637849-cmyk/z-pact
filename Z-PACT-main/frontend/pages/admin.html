@@ -1972,7 +1972,11 @@
                     </div>
                 </div>
                 <div id="file-field" class="form-group">
-                    <label class="form-label">ملف PDF</label>
+                    <label id="m-file-label" class="form-label">ملف PDF</label>
+                    <div id="m-file-edit-hint" class="hidden" style="margin-bottom: 8px; padding: 8px 10px; border-radius: 8px; background: rgba(56,189,248,0.08); border: 1px solid rgba(56,189,248,0.28); font-size: 12px; line-height: 1.6; color: var(--text-secondary);">
+                        <div id="m-current-file-info" style="font-weight: 600; color: var(--text-primary); margin-bottom: 2px;"></div>
+                        <div>اختر ملف PDF جديداً فقط إذا أردت استبدال الملف الحالي؛ سيتم الحفاظ على نفس البيانات وأماكن وأحجام الأختام المحفوظة كما هي.</div>
+                    </div>
                     <input type="file" id="m-file" class="form-input" accept="application/pdf">
                 </div>
                 <div class="form-group flex gap-2">
@@ -2727,6 +2731,10 @@
             document.getElementById("m-modal-title").textContent = "رفع ملف جديد";
             document.getElementById("material-form").reset();
             document.getElementById("m-id").value = "";
+            document.getElementById("m-file-label").textContent = "ملف PDF";
+            document.getElementById("m-file").value = "";
+            document.getElementById("m-file").required = true;
+            document.getElementById("m-file-edit-hint").classList.add("hidden");
             document.getElementById("file-field").classList.remove("hidden");
             document.getElementById("material-modal").classList.add("show");
         };
@@ -2742,7 +2750,14 @@
             document.getElementById("m-price").value = m.price;
             document.getElementById("m-price-coins").value = m.price_coins;
             document.getElementById("m-compress").checked = m.compression_enabled !== false;
-            document.getElementById("file-field").classList.add("hidden");
+            document.getElementById("m-file-label").textContent = "استبدال ملف PDF (اختياري)";
+            document.getElementById("m-file").value = "";
+            document.getElementById("m-file").required = false;
+            document.getElementById("m-current-file-info").textContent = m.total_pages
+                ? `الملف الحالي: ${m.total_pages} صفحة`
+                : "الملف الحالي محفوظ على السيرفر";
+            document.getElementById("m-file-edit-hint").classList.remove("hidden");
+            document.getElementById("file-field").classList.remove("hidden");
             document.getElementById("material-modal").classList.add("show");
         };
 
@@ -2771,32 +2786,40 @@
         window.handleMaterialSubmit = async (e) => {
             e.preventDefault();
             const id = document.getElementById("m-id").value;
+            const pdfFile = document.getElementById("m-file").files[0];
             const btn = document.getElementById("m-submit-btn");
             btn.classList.add("btn-loading");
 
             try {
+                const formData = new FormData();
+                formData.append("title", document.getElementById("m-title").value);
+                const tagVal = document.getElementById("m-tag").value;
                 if (id) {
-                    await materialsAPI.update(id, {
-                        title: document.getElementById("m-title").value,
-                        tag: document.getElementById("m-tag").value || null,
-                        description: document.getElementById("m-desc").value,
-                        price: document.getElementById("m-price").value,
-                        price_coins: document.getElementById("m-price-coins").value,
-                        compression_enabled: document.getElementById("m-compress").checked
-                    });
-                    showToast("تم تحديث البيانات بنجاح", "success");
-                } else {
-                    const formData = new FormData();
-                    formData.append("title", document.getElementById("m-title").value);
-                    if (document.getElementById("m-tag").value) {
-                        formData.append("tag", document.getElementById("m-tag").value);
-                    }
-                    formData.append("description", document.getElementById("m-desc").value);
-                    formData.append("price", document.getElementById("m-price").value);
-                    formData.append("price_coins", document.getElementById("m-price-coins").value);
-                    formData.append("pdf_file", document.getElementById("m-file").files[0]);
-                    formData.append("compression_enabled", document.getElementById("m-compress").checked);
+                    formData.append("tag", tagVal);
+                } else if (tagVal) {
+                    formData.append("tag", tagVal);
+                }
+                formData.append("description", document.getElementById("m-desc").value);
+                formData.append("price", document.getElementById("m-price").value);
+                formData.append("price_coins", document.getElementById("m-price-coins").value);
+                formData.append("compression_enabled", document.getElementById("m-compress").checked);
 
+                if (id) {
+                    if (pdfFile) {
+                        formData.append("pdf_file", pdfFile);
+                    }
+                    await materialsAPI.update(id, formData);
+                    showToast(
+                        pdfFile
+                            ? "تم تحديث البيانات واستبدال ملف الـ PDF مع الحفاظ على الأختام"
+                            : "تم تحديث البيانات بنجاح",
+                        "success"
+                    );
+                } else {
+                    if (!pdfFile) {
+                        throw new Error("يرجى اختيار ملف PDF أولاً");
+                    }
+                    formData.append("pdf_file", pdfFile);
                     await materialsAPI.upload(formData);
                     showToast("تم رفع الملف بنجاح", "success");
                 }

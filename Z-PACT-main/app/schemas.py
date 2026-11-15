@@ -131,6 +131,8 @@ class MaterialUpdate(AppBaseModel):
     compression_enabled: Optional[bool] = None
     cover_image_path: Optional[str] = None
     page_frame_path: Optional[str] = None
+    original_pdf_path: Optional[str] = None
+    total_pages:       Optional[int] = Field(None, ge=1)
 
 
 class MaterialOut(AppBaseModel):

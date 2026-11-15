@@ -606,6 +606,54 @@
         toast("❌ تعذر الحفظ: " + (res?.error || "خطأ بالسيرفر"));
       }
     });
+
+    qs("studio_btn_replace_pdf")?.addEventListener("click", () => {
+      if (!state.materialId) return toast("⚠️ اختر المذكرة أولاً");
+      qs("studio_pdf_file")?.click();
+    });
+
+    qs("studio_pdf_file")?.addEventListener("change", async (e) => {
+      const file = e.target.files?.[0];
+      e.target.value = "";
+      if (!file || !state.materialId) return;
+      if (!String(file.name || "").toLowerCase().endsWith(".pdf")) {
+        return toast("⚠️ يرجى اختيار ملف PDF فقط");
+      }
+
+      const btn = qs("studio_btn_replace_pdf");
+      if (btn) {
+        btn.disabled = true;
+        btn.textContent = "⏳ جاري رفع البديل...";
+      }
+      setLoading(true);
+      const res = await window.apiService.replaceMaterialPdf(state.materialId, file);
+      setLoading(false);
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "📄 استبدال ملف الـ PDF";
+      }
+
+      if (res && !res.error) {
+        const newPages = Math.max(1, Number(res.total_pages || state.totalPages || 1));
+        state.totalPages = newPages;
+        state.currentPage = clamp(state.currentPage, 1, newPages);
+        const matObj = (state.materials || []).find(m => Number(m.id) === Number(state.materialId));
+        if (matObj) matObj.total_pages = newPages;
+        const opt = Array.from(qs("studio_mat_select")?.options || []).find(
+          o => String(o.value) === String(state.materialId)
+        );
+        if (opt && matObj) {
+          const pubMark = matObj.is_published === false ? " [مخفية]" : "";
+          const frmMark = state.pageFramePath ? " 🖼️" : "";
+          opt.textContent = `#${matObj.id} — ${matObj.title} (${newPages} ص)${frmMark}${pubMark}`;
+        }
+        updatePageLabel();
+        await renderCanvasImage();
+        toast(`✅ تم استبدال ملف الـ PDF (${newPages} ص) مع الحفاظ على جميع الأختام والبيانات!`);
+      } else {
+        toast("❌ تعذر استبدال الملف: " + (res?.error || "خطأ بالسيرفر"));
+      }
+    });
   }
 
   window.initMobileAdminStudio = async function (preferMatId = null) {

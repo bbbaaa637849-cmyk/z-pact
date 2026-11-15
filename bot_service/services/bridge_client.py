@@ -570,5 +570,44 @@ class BridgeClient:
             except Exception as e:
                 return {"ok": False, "error": str(e)}
 
+    async def download_material_original(self, material_id: int) -> Optional[Dict[str, Any]]:
+        url = f"{self.base_url}/internal/admin/materials/{material_id}/original"
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            try:
+                res = await client.get(url, headers=self.headers)
+                if res.status_code != 200:
+                    logger.error(f"❌ [Bridge] download_material_original ({res.status_code}): {res.text[:200]}")
+                    return None
+                cd = res.headers.get("content-disposition", "")
+                filename = f"material_{material_id}_original.pdf"
+                if 'filename="' in cd:
+                    part = cd.split('filename="', 1)[1].split('"', 1)[0].strip()
+                    if part:
+                        filename = part
+                return {"bytes": res.content, "filename": filename}
+            except Exception as e:
+                logger.error(f"❌ [Bridge Exception] download_material_original: {e}")
+                return None
+
+    async def replace_material_pdf(
+        self,
+        material_id: int,
+        pdf_bytes: bytes,
+        filename: str = "booklet.pdf",
+    ) -> Dict[str, Any]:
+        url = f"{self.base_url}/internal/admin/materials/{material_id}/replace-pdf"
+        headers = {"X-Internal-Service-Key": bot_config.INTERNAL_SERVICE_KEY}
+        files = {"file": (filename or "booklet.pdf", pdf_bytes, "application/pdf")}
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            try:
+                res = await client.post(url, headers=headers, files=files)
+                data = res.json() if res.headers.get("content-type", "").startswith("application/json") else {}
+                if res.status_code == 200:
+                    return {"ok": True, "data": data}
+                return {"ok": False, "error": data.get("detail") or f"HTTP {res.status_code}"}
+            except Exception as e:
+                logger.error(f"❌ [Bridge Exception] replace_material_pdf: {e}")
+                return {"ok": False, "error": str(e)}
+
 
 bridge_client = BridgeClient()

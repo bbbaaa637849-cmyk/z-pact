@@ -1037,6 +1037,8 @@ def admin_update_material(
 
     if "price" in data:
         mat.price = float(data["price"])
+    if "price_coins" in data:
+        mat.price_coins = float(data["price_coins"])
     if "title" in data:
         mat.title = str(data["title"]).strip()
     if "tag" in data:
@@ -1048,7 +1050,81 @@ def admin_update_material(
 
     db.commit()
     db.refresh(mat)
+    try:
+        from app.routers.materials import invalidate_materials_cache
+        invalidate_materials_cache()
+    except Exception:
+        pass
     logger.info(f"📚 [Admin Bridge] تم تحديث المذكرة {material_id}: {mat.title} - السعر: {mat.price}")
+    return schemas.MaterialOut.model_validate(mat)
+
+
+@router.get("/admin/materials/{material_id}/original", summary="تحميل ملف الـ PDF الأصلي للمذكرة (للأدمن والبوت)")
+def admin_download_material_original(
+    material_id: int,
+    db: Session = Depends(get_db),
+    _key: str = Depends(verify_internal_key),
+):
+    mat = db.query(Material).filter(Material.id == material_id).first()
+    if not mat:
+        raise HTTPException(status_code=404, detail="المذكرة غير موجودة")
+    pdf_path = _resolve_material_path(mat.original_pdf_path)
+    if not pdf_path or not os.path.exists(pdf_path):
+        raise HTTPException(status_code=404, detail="ملف الـ PDF الأصلي غير موجود")
+    safe_title = re.sub(r'[\\/*?:"<>|]+', "_", (mat.title or f"material_{material_id}")).strip() or f"material_{material_id}"
+    return FileResponse(path=pdf_path, media_type="application/pdf", filename=f"{safe_title}_original.pdf")
+
+
+@router.post("/admin/materials/{material_id}/replace-pdf", summary="استبدال ملف الـ PDF الأصلي لمذكرة مع الاحتفاظ بنفس البيانات والأختام")
+async def admin_replace_material_pdf(
+    material_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    _key: str = Depends(verify_internal_key),
+):
+    from app.routers.materials import (
+        save_and_optimize_uploaded_pdf,
+        cleanup_unreferenced_original_pdf,
+        invalidate_materials_cache,
+    )
+
+    mat = db.query(Material).filter(Material.id == material_id).first()
+    if not mat:
+        raise HTTPException(status_code=404, detail="المذكرة غير موجودة")
+
+    old_portable = mat.original_pdf_path
+    old_abs = _resolve_material_path(old_portable)
+
+    orig_name = file.filename or "booklet.pdf"
+    clean_name = re.sub(r'[^a-zA-Z0-9_.-]', '_', orig_name)
+    safe_name = f"mat_{secrets.token_hex(4)}_{clean_name}"
+    if not safe_name.lower().endswith(".pdf"):
+        safe_name += ".pdf"
+
+    new_file_path, total_pages = await save_and_optimize_uploaded_pdf(
+        file,
+        file_name_override=safe_name,
+    )
+
+    try:
+        mat.original_pdf_path = settings.to_portable_storage_path(new_file_path, "originals")
+        mat.total_pages = total_pages
+        db.commit()
+        db.refresh(mat)
+    except Exception:
+        if os.path.exists(new_file_path):
+            os.remove(new_file_path)
+        raise
+
+    invalidate_materials_cache()
+    cleanup_unreferenced_original_pdf(
+        db,
+        material_id=material_id,
+        old_portable_path=old_portable,
+        old_abs_path=old_abs,
+        exclude_abs_path=new_file_path,
+    )
+    logger.info(f"♻️ [Admin Bridge] تم استبدال ملف الـ PDF للمذكرة #{material_id} '{mat.title}' ({total_pages} ص) مع الحفاظ على جميع الأختام والبيانات")
     return schemas.MaterialOut.model_validate(mat)
 
 

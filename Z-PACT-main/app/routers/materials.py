@@ -137,8 +137,158 @@ def list_all_materials(
 
 
 # ================================================================
-# رفع ملف جديد (Admin فقط)
+# رفع ملف جديد (Admin فقط) + أدوات حفظ/استبدال الـ PDF المشتركة
 # ================================================================
+
+MAX_PDF_UPLOAD_BYTES = 50 * 1024 * 1024
+MAX_PDF_UPLOAD_PAGES = 600
+
+
+def _save_cover_upload(cover_image: UploadFile, covers_dir: Optional[str] = None) -> str:
+    """حفظ صورة غلاف المذكرة مع التحقق من نوع الصورة."""
+    if not (cover_image.content_type or "").startswith("image/"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="ملف الغلاف يجب أن يكون صورة فقط",
+        )
+    target_covers_dir = covers_dir or COVERS_DIR
+    os.makedirs(target_covers_dir, exist_ok=True)
+    img_id = uuid.uuid4().hex
+    img_ext = os.path.splitext(cover_image.filename or "cover.png")[1] or ".png"
+    img_name = f"{img_id}{img_ext}"
+    img_path = os.path.join(target_covers_dir, img_name)
+    try:
+        with open(img_path, "wb") as f:
+            shutil.copyfileobj(cover_image.file, f)
+        return f"/storage/covers/{img_name}"
+    except Exception as e:
+        logger.error(f"❌ [Upload Error] Failed to save cover image: {e}")
+        raise HTTPException(status_code=500, detail="فشل في حفظ صورة الغلاف على السيرفر")
+
+
+async def save_and_optimize_uploaded_pdf(
+    pdf_file: UploadFile,
+    upload_dir: Optional[str] = None,
+    file_name_override: Optional[str] = None,
+) -> tuple[str, int]:
+    """
+    حفظ ملف PDF أصلي بأمان، التحقق من صلاحيته وعدم تشفيره وحد الصفحات،
+    ثم ضغطه وتنظيف بنيته في نفس الخطوة وإرجاع (file_path, total_pages).
+    """
+    content_type = (pdf_file.content_type or "").lower().strip()
+    orig_fname = (pdf_file.filename or "").lower().strip()
+    if content_type != "application/pdf" and not orig_fname.endswith(".pdf"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="الملف لازم يكون PDF فقط",
+        )
+
+    pdf_file.file.seek(0, os.SEEK_END)
+    file_size = pdf_file.file.tell()
+    pdf_file.file.seek(0)
+
+    if file_size <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="ملف الـ PDF فارغ",
+        )
+    if file_size > MAX_PDF_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"حجم الملف كبير جداً ({file_size // (1024*1024)}MB). الحد الأقصى هو 50MB.",
+        )
+
+    target_upload_dir = upload_dir or UPLOAD_DIR
+    os.makedirs(target_upload_dir, exist_ok=True)
+    file_name = file_name_override or f"{uuid.uuid4().hex}.pdf"
+    file_path = os.path.join(target_upload_dir, file_name)
+
+    try:
+        with open(file_path, "wb") as f:
+            shutil.copyfileobj(pdf_file.file, f)
+    except Exception as e:
+        logger.error(f"❌ [Upload Error] Failed to write PDF file: {e}")
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        raise HTTPException(status_code=500, detail="فشل في حفظ الملف على السيرفر")
+
+    total_pages = 0
+    try:
+        doc = fitz.open(file_path)
+        if doc.is_encrypted:
+            doc.close()
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="ملف الـ PDF محمي بكلمة سر — يرجى إزالة الحماية قبل الرفع",
+            )
+        total_pages = len(doc)
+        doc.close()
+
+        if total_pages <= 0:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="ملف الـ PDF لا يحتوي على أي صفحات",
+            )
+        if total_pages > MAX_PDF_UPLOAD_PAGES:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            logger.warning(f"⚠️ [Upload] File too long: {total_pages} pages")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"عدد صفحات الملف كبير جداً ({total_pages} صفحة). الحد الأقصى هو {MAX_PDF_UPLOAD_PAGES} صفحة.",
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ [Upload Error] PDF validation failed: {e}")
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        raise HTTPException(
+            status_code=400,
+            detail="فشل في معالجة ملف الـ PDF - قد يكون الملف تالفاً أو غير صالح",
+        )
+
+    try:
+        await asyncio.to_thread(optimize_original_pdf_file, file_path)
+    except Exception as opt_err:
+        logger.warning(f"⚠️ [Upload] PDF optimization skipped cleanly: {opt_err}")
+
+    logger.info(f"✓ [Upload] Validated & optimized PDF saved to {file_path} ({total_pages} pages)")
+    return file_path, total_pages
+
+
+def cleanup_unreferenced_original_pdf(
+    db: Session,
+    material_id: int,
+    old_portable_path: Optional[str],
+    old_abs_path: Optional[str],
+    exclude_abs_path: Optional[str] = None,
+) -> None:
+    """حذف ملف الـ PDF القديم من القرص بأمان إذا لم تعد أي مذكرة أخرى تشير إليه."""
+    if not old_abs_path or not os.path.exists(old_abs_path):
+        return
+    if exclude_abs_path and os.path.abspath(old_abs_path) == os.path.abspath(exclude_abs_path):
+        return
+    if old_portable_path:
+        other_refs = (
+            db.query(models.Material)
+            .filter(
+                models.Material.original_pdf_path == old_portable_path,
+                models.Material.id != material_id,
+            )
+            .count()
+        )
+        if other_refs > 0:
+            return
+    try:
+        os.remove(old_abs_path)
+    except OSError as rm_err:
+        logger.warning(f"⚠️ [Cleanup] Could not remove replaced PDF {old_abs_path}: {rm_err}")
+
 
 @router.post(
     "/",
@@ -165,82 +315,13 @@ async def upload_material(
     الملف بيتحفظ على السيرفر وبيتسجل في قاعدة البيانات.
     مش بيظهر في المتجر حتى يتعمله is_published = True.
     """
-    # --- التحقق من نوع الملف ---
-    if pdf_file.content_type != "application/pdf":
-        raise HTTPException(
-            status_code = status.HTTP_400_BAD_REQUEST,
-            detail      = "الملف لازم يكون PDF فقط",
-        )
-
-    # --- التحقق من حجم الملف (الحد الأقصى: 50 ميجابايت) ---
-    MAX_FILE_SIZE = 50 * 1024 * 1024
-    pdf_file.file.seek(0, os.SEEK_END)
-    file_size = pdf_file.file.tell()
-    pdf_file.file.seek(0)
-    
-    if file_size > MAX_FILE_SIZE:
-        raise HTTPException(
-            status_code = status.HTTP_400_BAD_REQUEST,
-            detail      = f"حجم الملف كبير جداً ({file_size // (1024*1024)}MB). الحد الأقصى هو 50MB.",
-        )
-
-    # --- حفظ الملف بـ اسم فريد ---
-    file_id   = uuid.uuid4().hex
-    file_name = f"{file_id}.pdf"
-    file_path = os.path.join(UPLOAD_DIR, file_name)
-
-    try:
-        with open(file_path, "wb") as f:
-            shutil.copyfileobj(pdf_file.file, f)
-        await asyncio.to_thread(optimize_original_pdf_file, file_path)
-        logger.info(f"✓ [Upload] File saved to {file_path}")
-    except Exception as e:
-        logger.error(f"❌ [Upload Error] Failed to save file: {e}")
-        raise HTTPException(status_code=500, detail="فشل في حفظ الملف على السيرفر")
-
-    # --- قراءة عدد الصفحات والتحقق من الحد الأقصى ---
-    total_pages = 0
-    try:
-        # استخدام timeout بسيط لو أمكن أو التأكد من عدم التعليق
-        doc         = fitz.open(file_path)
-        total_pages = len(doc)
-        doc.close()
-        
-        MAX_PAGES = 600
-        if total_pages > MAX_PAGES:
-            if os.path.exists(file_path): os.remove(file_path)
-            logger.warning(f"⚠️ [Upload] File too long: {total_pages} pages")
-            raise HTTPException(
-                status_code = status.HTTP_400_BAD_REQUEST,
-                detail      = f"عدد صفحات الملف كبير جداً ({total_pages} صفحة). الحد الأقصى هو {MAX_PAGES} صفحة.",
-            )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ [Upload Error] PDF processing failed: {e}")
-        if os.path.exists(file_path): os.remove(file_path)
-        raise HTTPException(status_code=400, detail="فشل في معالجة ملف الـ PDF - قد يكون الملف تالفاً أو محمياً بكلمة سر")
+    file_path, total_pages = await save_and_optimize_uploaded_pdf(pdf_file)
 
     # --- حفظ صورة الغلاف لو مرفوعة ---
     cover_image_path = None
     if cover_image:
-        if not cover_image.content_type.startswith("image/"):
-            raise HTTPException(
-                status_code = status.HTTP_400_BAD_REQUEST,
-                detail      = "ملف الغلاف يجب أن يكون صورة فقط",
-            )
-        img_id = uuid.uuid4().hex
-        img_ext = os.path.splitext(cover_image.filename)[1] or ".png"
-        img_name = f"{img_id}{img_ext}"
-        img_path = os.path.join(COVERS_DIR, img_name)
-        try:
-            with open(img_path, "wb") as f:
-                shutil.copyfileobj(cover_image.file, f)
-            cover_image_path = f"/storage/covers/{img_name}"
-            logger.info(f"✓ [Upload] Cover image saved to {img_path}")
-        except Exception as e:
-            logger.error(f"❌ [Upload Error] Failed to save cover image: {e}")
-            raise HTTPException(status_code=500, detail="فشل في حفظ صورة الغلاف على السيرفر")
+        cover_image_path = _save_cover_upload(cover_image, COVERS_DIR)
+        logger.info(f"✓ [Upload] Cover image saved: {cover_image_path}")
     else:
         # استخراج أول صفحة كغلاف
         try:
@@ -513,6 +594,7 @@ async def update_material(
     price_coins: Optional[float]     = Form(None),
     is_published: Optional[bool]     = Form(None),
     compression_enabled: Optional[bool] = Form(None),
+    pdf_file:    Optional[UploadFile] = File(None),
     cover_image: Optional[UploadFile] = File(None),
     page_frame:  Optional[UploadFile] = File(None),
     db:          Session             = Depends(get_db),
@@ -522,22 +604,22 @@ async def update_material(
     if not material:
         raise HTTPException(status_code=404, detail="الملف غير موجود")
 
+    # استبدال ملف الـ PDF الأصلي عند رفعه مع الاحتفاظ بجميع البيانات وأماكن الأختام والتنسيقات
+    new_pdf_abs_path: Optional[str] = None
+    old_pdf_portable: Optional[str] = material.original_pdf_path
+    old_pdf_abs: Optional[str] = _resolve_existing_material_path(material)
+    new_total_pages: Optional[int] = None
+    if pdf_file and (pdf_file.filename or (pdf_file.content_type or "").lower() == "application/pdf"):
+        new_pdf_abs_path, new_total_pages = await save_and_optimize_uploaded_pdf(pdf_file)
+
     # Handle cover_image upload if provided
     cover_image_path = None
-    if cover_image:
-        if not cover_image.content_type.startswith("image/"):
-            raise HTTPException(status_code=400, detail="ملف الغلاف يجب أن يكون صورة فقط")
-        img_id = uuid.uuid4().hex
-        img_ext = os.path.splitext(cover_image.filename)[1] or ".png"
-        img_name = f"{img_id}{img_ext}"
-        img_path = os.path.join(COVERS_DIR, img_name)
-        with open(img_path, "wb") as f:
-            shutil.copyfileobj(cover_image.file, f)
-        cover_image_path = f"/storage/covers/{img_name}"
+    if cover_image and cover_image.filename:
+        cover_image_path = _save_cover_upload(cover_image, COVERS_DIR)
 
     # Handle page_frame upload if provided
     page_frame_path = None
-    if page_frame:
+    if page_frame and page_frame.filename:
         page_frame_path = _save_processed_frame_upload(page_frame, FRAMES_DIR)
 
     # Construct the update schema
@@ -554,16 +636,34 @@ async def update_material(
     if compression_enabled is not None: update_dict["compression_enabled"] = compression_enabled
     if cover_image_path is not None: update_dict["cover_image_path"] = cover_image_path
     if page_frame_path is not None: update_dict["page_frame_path"] = page_frame_path
+    if new_pdf_abs_path is not None:
+        update_dict["original_pdf_path"] = settings.to_portable_storage_path(new_pdf_abs_path, "originals")
+        update_dict["total_pages"] = new_total_pages
 
     # Construct MaterialUpdate with only set fields
-    update_data = schemas.MaterialUpdate.model_validate(update_dict)
-    
-    update_data.model_fields_set.clear()
-    for k in update_dict.keys():
-        update_data.model_fields_set.add(k)
+    try:
+        update_data = schemas.MaterialUpdate.model_validate(update_dict)
 
-    material = crud.update_material(db, material_id, update_data)
+        update_data.model_fields_set.clear()
+        for k in update_dict.keys():
+            update_data.model_fields_set.add(k)
+
+        material = crud.update_material(db, material_id, update_data)
+    except Exception:
+        if new_pdf_abs_path and os.path.exists(new_pdf_abs_path):
+            os.remove(new_pdf_abs_path)
+        raise
+
     invalidate_materials_cache()
+    if new_pdf_abs_path is not None:
+        cleanup_unreferenced_original_pdf(
+            db,
+            material_id=material_id,
+            old_portable_path=old_pdf_portable,
+            old_abs_path=old_pdf_abs,
+            exclude_abs_path=new_pdf_abs_path,
+        )
+        logger.info(f"♻️ [Material PDF Replaced] المذكرة #{material_id} ({new_total_pages} ص) — تم الحفاظ على جميع البيانات والتنسيقات")
     return schemas.MaterialOut.model_validate(material)
 
 
