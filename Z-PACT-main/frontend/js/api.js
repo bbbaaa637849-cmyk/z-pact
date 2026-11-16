@@ -77,7 +77,14 @@ async function _request(method, endpoint, body = null, isFormData = false) {
     const res  = await fetch(`${BASE_URL}${endpoint}`, config);
     const data = await res.json().catch(() => null);
 
-    if (res.status === 401 && !endpoint.includes("/auth/login")) {
+    if (
+      res.status === 401 &&
+      !endpoint.includes("/auth/login") &&
+      !endpoint.includes("/admin-vault/login") &&
+      !endpoint.includes("/auth/admin/recover") &&
+      !endpoint.includes("/auth/teacher-login") &&
+      !endpoint.includes("/sender/login")
+    ) {
       localStorage.removeItem("access_token");
       localStorage.removeItem("current_user");
       window.location.href = "login.html";
@@ -367,7 +374,36 @@ window.presetsAPI = presetsAPI;
 window.coinsAPI = coinsAPI;
 window.jobsAPI = jobsAPI;
 window.statsAPI = statsAPI;
+const adminSecurityAPI = {
+  getOverview: () => get("/auth/admin/security"),
+  updateMaxDevices: (maxDevices, kickExcess = true) =>
+    put("/auth/admin/security/max-devices", { max_devices: Number(maxDevices), kick_excess: Boolean(kickExcess) }),
+  saveRecoveryPassword: (payload) =>
+    post("/auth/admin/security/recovery-password", payload),
+  terminateSession: (sessionId, releaseDevice = true, blockDevice = false) =>
+    del(`/auth/admin/security/sessions/${encodeURIComponent(sessionId)}?release_device=${Boolean(releaseDevice)}&block_device=${Boolean(blockDevice)}`),
+  revokeOtherSessions: (releaseDevices = true) =>
+    post(`/auth/admin/security/sessions/revoke-others?release_devices=${Boolean(releaseDevices)}`, {}),
+  removeDevice: (deviceRowId) =>
+    del(`/auth/admin/security/devices/${deviceRowId}`),
+  toggleBlockDevice: (deviceRowId) =>
+    post(`/auth/admin/security/devices/${deviceRowId}/toggle-block`, {}),
+  recoverAccount: async (recoveryPassword, newPassword) => {
+    const res = await post("/auth/admin/recover", {
+      recovery_password: recoveryPassword,
+      new_password: newPassword,
+      device_id: getDeviceID(),
+    });
+    if (res && res.access_token) {
+      localStorage.setItem("access_token", res.access_token);
+      localStorage.setItem("current_user", JSON.stringify(res.user));
+    }
+    return res;
+  },
+};
+
 window.v3API = v3API;
+window.adminSecurityAPI = adminSecurityAPI;
 window.getCurrentUser = getCurrentUser;
 window.isLoggedIn = isLoggedIn;
 window.isAdmin = isAdmin;

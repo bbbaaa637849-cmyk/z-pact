@@ -700,6 +700,237 @@ class TestZPACTComprehensiveSuite(unittest.TestCase):
                     except OSError:
                         pass
 
+    # -------------------------------------------------------------
+    # 10. اختبار أمان حساب الأدمن الأعلى: الحد الأقصى للأجهزة، الجلسات، وكلمة سر الاسترداد
+    # -------------------------------------------------------------
+    def test_10_supreme_admin_security_devices_sessions_and_recovery(self):
+        """
+        التحقق الكامل من:
+        1. اقتصار إعدادات الأمان العليا على الأدمن الأعلى ومنع المشرف الفرعي (403).
+        2. تحديد الحد الأقصى للأجهزة (max_devices) وفرضه على كلٍ من /auth/login و /v3/admin-vault/login.
+        3. عرض الجلسات النشطة وإنهاء أي جلسة محددة (أو الكل ما عدا الحالية) مع إبطال التوكن لحظياً.
+        4. حماية كلمة سر الاسترداد من التعديل بكلمة المرور العادية، واسترداد الحساب عند اختراقه مع طرد المخترق فوراً.
+        """
+        admin_user = self.db.query(User).filter(User.email == "admin_primary@example.com").first()
+        self.assertIsNotNone(admin_user)
+        admin_user.is_founding_admin = True
+        self.db.commit()
+
+        # إنشاء مشرف فرعي والتأكد من منعه عن إعدادات الأدمن الأعلى
+        co_admin = User(
+            email="co_admin_sec@example.com",
+            password_hash=hash_password("coAdminPass123!"),
+            full_name="مشرف فرعي للاختبار",
+            role=UserRole.ADMIN,
+            is_founding_admin=False,
+            is_active=True,
+            approval_status="approved",
+        )
+        self.db.add(co_admin)
+        self.db.commit()
+        self.db.refresh(co_admin)
+        co_login = self.client.post(
+            "/api/auth/login",
+            json={"email": "co_admin_sec@example.com", "password": "coAdminPass123!", "device_id": "co-dev-1"},
+        )
+        self.assertEqual(co_login.status_code, 200, co_login.text)
+        co_token = co_login.json()["access_token"]
+        self.assertEqual(
+            self.client.get("/api/auth/admin/security", headers={"Authorization": f"Bearer {co_token}"}).status_code,
+            403,
+        )
+
+        # 1. دخول الأدمن الأعلى من جهازين عبر الويب وبوابة الأدمن
+        r_d1 = self.client.post(
+            "/api/auth/login",
+            json={"email": "admin_primary@example.com", "password": "adminSecret123!", "device_id": "adm-web-1"},
+        )
+        self.assertEqual(r_d1.status_code, 200, r_d1.text)
+        t1 = r_d1.json()["access_token"]
+        self.assertTrue(r_d1.json()["user"]["is_supreme_admin"])
+
+        r_d2 = self.client.post(
+            "/api/v3/admin-vault/login",
+            json={"password": "adminSecret123!", "device_id": "adm-vault-2"},
+        )
+        self.assertEqual(r_d2.status_code, 200, r_d2.text)
+        t2 = r_d2.json()["access_token"]
+
+        # 2. ضبط الحد الأقصى للأجهزة على 2 -> منع جهاز ثالث على كلتا البوابتين
+        r_max = self.client.put(
+            "/api/auth/admin/security/max-devices",
+            headers={"Authorization": f"Bearer {t1}"},
+            json={"max_devices": 2, "kick_excess": True},
+        )
+        self.assertEqual(r_max.status_code, 200, r_max.text)
+
+        self.assertEqual(
+            self.client.post(
+                "/api/auth/login",
+                json={"email": "admin_primary@example.com", "password": "adminSecret123!", "device_id": "adm-web-3"},
+            ).status_code,
+            403,
+        )
+        self.assertEqual(
+            self.client.post(
+                "/api/v3/admin-vault/login",
+                json={"password": "adminSecret123!", "device_id": "adm-vault-3"},
+            ).status_code,
+            403,
+        )
+
+        # 3. جلب الجلسات وإنهاء جلسة adm-vault-2 مع إبقاء t1 فعّالاً
+        r_ov = self.client.get("/api/auth/admin/security", headers={"Authorization": f"Bearer {t1}"})
+        self.assertEqual(r_ov.status_code, 200, r_ov.text)
+        sessions = r_ov.json()["sessions"]
+        s1 = next((s for s in sessions if s["device_id"] == "adm-web-1"), None)
+        s2 = next((s for s in sessions if s["device_id"] == "adm-vault-2"), None)
+        self.assertIsNotNone(s1)
+        self.assertIsNotNone(s2)
+        self.assertTrue(s1["is_current"])
+        self.assertFalse(s2["is_current"])
+
+        r_kill = self.client.delete(
+            f"/api/auth/admin/security/sessions/{s2['session_id']}",
+            headers={"Authorization": f"Bearer {t1}"},
+        )
+        self.assertEqual(r_kill.status_code, 200, r_kill.text)
+
+        # توكن t2 المطرود يرفض فوراً بـ 401 على /auth/me وعلى نقاط v3 الإدارية
+        self.assertEqual(
+            self.client.get("/api/auth/me", headers={"Authorization": f"Bearer {t2}"}).status_code,
+            401,
+        )
+        self.assertEqual(
+            self.client.get("/api/v3/admin/overview", headers={"Authorization": f"Bearer {t2}"}).status_code,
+            401,
+        )
+        # توكن t1 ما زال يعمل بشكل طبيعي
+        self.assertEqual(
+            self.client.get("/api/auth/me", headers={"Authorization": f"Bearer {t1}"}).status_code,
+            200,
+        )
+
+        # بما أنه تم تحرير مكان adm-vault-2، يستطيع adm-web-3 الدخول الآن ضمن الحد 2
+        r_d3 = self.client.post(
+            "/api/auth/login",
+            json={"email": "admin_primary@example.com", "password": "adminSecret123!", "device_id": "adm-web-3"},
+        )
+        self.assertEqual(r_d3.status_code, 200, r_d3.text)
+        t3 = r_d3.json()["access_token"]
+
+        # إنهاء جميع الجلسات الأخرى من t1 يطرد t3 ويبقي t1
+        r_kill_others = self.client.post(
+            "/api/auth/admin/security/sessions/revoke-others",
+            headers={"Authorization": f"Bearer {t1}"},
+        )
+        self.assertEqual(r_kill_others.status_code, 200, r_kill_others.text)
+        self.assertEqual(
+            self.client.get("/api/auth/me", headers={"Authorization": f"Bearer {t3}"}).status_code,
+            401,
+        )
+        self.assertEqual(
+            self.client.get("/api/auth/me", headers={"Authorization": f"Bearer {t1}"}).status_code,
+            200,
+        )
+
+        # 4. إعداد كلمة سر الاسترداد وحمايتها من التغيير بكلمة المرور العادية
+        self.assertEqual(
+            self.client.post(
+                "/api/auth/admin/security/recovery-password",
+                headers={"Authorization": f"Bearer {t1}"},
+                json={"current_password": "WrongPass!", "new_recovery_password": "RecoveryMaster#2026"},
+            ).status_code,
+            403,
+        )
+        r_rec_set = self.client.post(
+            "/api/auth/admin/security/recovery-password",
+            headers={"Authorization": f"Bearer {t1}"},
+            json={"current_password": "adminSecret123!", "new_recovery_password": "RecoveryMaster#2026"},
+        )
+        self.assertEqual(r_rec_set.status_code, 200, r_rec_set.text)
+
+        # محاولة تغيير كلمة سر الاسترداد بعد تعيينها باستخدام كلمة المرور العادية فقط -> مرفوضة (403)
+        self.assertEqual(
+            self.client.post(
+                "/api/auth/admin/security/recovery-password",
+                headers={"Authorization": f"Bearer {t1}"},
+                json={"current_password": "adminSecret123!", "new_recovery_password": "HackerOverride999"},
+            ).status_code,
+            403,
+        )
+
+        # محاكاة اختراق الحساب: دخول المخترق وتغيير كلمة المرور العادية
+        r_hack_login = self.client.post(
+            "/api/auth/login",
+            json={"email": "admin_primary@example.com", "password": "adminSecret123!", "device_id": "hacker-dev-99"},
+        )
+        self.assertEqual(r_hack_login.status_code, 200, r_hack_login.text)
+        hacker_token = r_hack_login.json()["access_token"]
+        r_hack_pw = self.client.put(
+            "/api/users/me",
+            headers={"Authorization": f"Bearer {hacker_token}"},
+            json={"password": "HackedPassword#999"},
+        )
+        self.assertEqual(r_hack_pw.status_code, 200, r_hack_pw.text)
+
+        # المالك يستخدم نقطة الاسترداد بدون توكن (كلمة سر استرداد خاطئة -> 401)
+        self.assertEqual(
+            self.client.post(
+                "/api/auth/admin/recover",
+                json={
+                    "recovery_password": "WrongRecovery",
+                    "new_password": "OwnerCleanPass#2026",
+                    "device_id": "owner-safe-dev",
+                },
+            ).status_code,
+            401,
+        )
+
+        # استرداد ناجح بكلمة سر الاسترداد -> تعيين كلمة السر الجديدة + طرد المخترق وكافة الجلسات
+        r_recover = self.client.post(
+            "/api/auth/admin/recover",
+            json={
+                "recovery_password": "RecoveryMaster#2026",
+                "new_password": "OwnerCleanPass#2026",
+                "device_id": "owner-safe-dev",
+            },
+        )
+        self.assertEqual(r_recover.status_code, 200, r_recover.text)
+        recovered_token = r_recover.json()["access_token"]
+
+        # جلسة المخترق وجلسة t1 القديمة مطرودة فوراً بـ 401 عبر رفع token_version وإنهاء الجلسات
+        self.assertEqual(
+            self.client.get("/api/auth/me", headers={"Authorization": f"Bearer {hacker_token}"}).status_code,
+            401,
+        )
+        self.assertEqual(
+            self.client.get("/api/v3/admin/overview", headers={"Authorization": f"Bearer {hacker_token}"}).status_code,
+            401,
+        )
+        self.assertEqual(
+            self.client.get("/api/auth/me", headers={"Authorization": f"Bearer {t1}"}).status_code,
+            401,
+        )
+
+        # كلمة مرور المخترق لم تعد تعمل، وكلمة مرور المالك المستردة تعمل + التوكن الجديد صالح
+        self.assertEqual(
+            self.client.get("/api/auth/me", headers={"Authorization": f"Bearer {recovered_token}"}).status_code,
+            200,
+        )
+        self.assertEqual(
+            self.client.post(
+                "/api/v3/admin-vault/login",
+                json={"password": "HackedPassword#999", "device_id": "hacker-dev-99"},
+            ).status_code,
+            401,
+        )
+        r_relogin = self.client.post(
+            "/api/v3/admin-vault/login",
+            json={"password": "OwnerCleanPass#2026", "device_id": "owner-safe-dev"},
+        )
+        self.assertEqual(r_relogin.status_code, 200, r_relogin.text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -133,6 +133,15 @@ class User(Base):
     phone_verified = Column(Boolean, default=False)
     has_custom_password = Column(Boolean, default=False)
     is_founding_admin = Column(Boolean, default=False, index=True)        # أول أدمن (المؤسس السيادي)
+    max_devices       = Column(Integer, nullable=True)                    # الحد الأقصى للأجهزة المسموح بها (null = الافتراضي حسب الدور)
+    token_version     = Column(Integer, default=1, nullable=False)        # رقم إصدار التوكنات لإبطال جميع الجلسات لحظياً
+    recovery_password_hash = Column(String(255), nullable=True)           # كلمة سر الاسترداد الطارئة (منفصلة عن كلمة المرور العادية)
+
+    sessions = relationship("UserSession", back_populates="user", cascade="all, delete-orphan")
+
+    @property
+    def has_recovery_password(self) -> bool:
+        return bool(self.recovery_password_hash)
     admin_label   = Column(String(120), nullable=True)                    # اسم/وصف حساب الأدمن
     
     created_at    = Column(DateTime, default=datetime.utcnow)
@@ -470,6 +479,25 @@ class CoinTransaction(Base):
 # ================================================================
 # 11. أجهزة المستخدم (User Devices) — للحماية من مشاركة الحسابات
 # ================================================================
+
+class UserSession(Base):
+    """سجل الجلسات النشطة لكل مستخدم (لإدارة الجلسات وإبطال التوكنات لحظياً)"""
+    __tablename__ = "user_sessions"
+
+    id            = Column(Integer, primary_key=True, index=True)
+    session_id    = Column(String(64), unique=True, index=True, nullable=False)
+    user_id       = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    device_id     = Column(String(255), nullable=False, index=True)
+    user_agent    = Column(String(500), nullable=True)
+    ip_address    = Column(String(100), nullable=True)
+    login_surface = Column(String(50), default="web", nullable=False)
+    is_active     = Column(Boolean, default=True, nullable=False, index=True)
+    revoked_at    = Column(DateTime, nullable=True)
+    created_at    = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_seen_at  = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    user = relationship("User", back_populates="sessions")
+
 
 class UserDevice(Base):
     __tablename__ = "user_devices"

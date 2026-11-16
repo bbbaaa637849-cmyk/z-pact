@@ -81,6 +81,9 @@ class UserOut(AppBaseModel):
     approval_status: Optional[str] = "approved"
     phone_verified:  Optional[bool] = False
     is_founding_admin: Optional[bool] = False
+    is_supreme_admin:  Optional[bool] = False
+    max_devices:       Optional[int] = None
+    has_recovery_password: Optional[bool] = False
     admin_label:     Optional[str] = None
     
     created_at: datetime
@@ -391,6 +394,47 @@ class UserDeviceOut(AppBaseModel):
     is_blocked: bool
     last_login: datetime
     created_at: datetime
+
+
+class UserSessionOut(AppBaseModel):
+    session_id: str
+    device_id: str
+    user_agent: Optional[str] = None
+    ip_address: Optional[str] = None
+    login_surface: str = "web"
+    is_active: bool = True
+    is_current: bool = False
+    created_at: datetime
+    last_seen_at: datetime
+
+
+class MaxDevicesUpdate(AppBaseModel):
+    max_devices: int = Field(..., ge=1, le=50, description="الحد الأقصى للأجهزة المسموح بها (من 1 إلى 50)")
+    kick_excess: bool = Field(default=True, description="طرد الأجهزة/الجلسات الزائدة فوراً إذا تجاوزت الحد الجديد")
+
+
+class RecoveryPasswordUpdate(AppBaseModel):
+    current_password: Optional[str] = Field(None, description="كلمة المرور الحالية (مطلوبة عند الإعداد لأول مرة)")
+    current_recovery_password: Optional[str] = Field(None, description="كلمة سر الاسترداد الحالية (مطلوبة عند تغييرها لاحقاً)")
+    new_recovery_password: str = Field(..., min_length=6, max_length=128, description="كلمة سر الاسترداد الجديدة (6 أحرف على الأقل)")
+
+
+class AdminRecoverAccountRequest(AppBaseModel):
+    recovery_password: str = Field(..., min_length=1, max_length=128)
+    new_password: str = Field(..., min_length=6, max_length=128, description="كلمة المرور الجديدة للحساب")
+    device_id: str = Field(default="web-recovery", max_length=255)
+
+
+class AdminSecurityOverviewOut(AppBaseModel):
+    is_supreme_admin: bool
+    effective_max_devices: int
+    configured_max_devices: Optional[int] = None
+    registered_devices_count: int
+    active_sessions_count: int
+    has_recovery_password: bool
+    current_session_id: Optional[str] = None
+    sessions: list[UserSessionOut]
+    devices: list[UserDeviceOut]
 
 class ChatMessageOut(AppBaseModel):
     id: int

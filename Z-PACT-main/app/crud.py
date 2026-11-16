@@ -884,3 +884,252 @@ def get_background_job_by_id(db: Session, job_id: str) -> Optional[models.Backgr
     """جلب تفاصيل وظيفة معينة بالـ UUID"""
     return db.query(models.BackgroundJob).filter(models.BackgroundJob.job_id == job_id).first()
 
+
+# ================================================================
+# CRUD — SUPREME ADMIN SECURITY, DEVICE LIMITS & USER SESSIONS
+# ================================================================
+
+def get_supreme_admin(db: Session) -> Optional[models.User]:
+    """إرجاع حساب الأدمن الأعلى (المؤسس السيادي أو أقدم أدمن نشط عند عدم تفعيل المؤسس)"""
+    founding = (
+        db.query(models.User)
+        .filter(models.User.role == models.UserRole.ADMIN, models.User.is_founding_admin == True)
+        .order_by(models.User.id.asc())
+        .first()
+    )
+    if founding:
+        return founding
+    return (
+        db.query(models.User)
+        .filter(models.User.role == models.UserRole.ADMIN, models.User.is_active == True)
+        .order_by(models.User.id.asc())
+        .first()
+    )
+
+
+def is_supreme_admin(db: Session, user: Optional[models.User]) -> bool:
+    """التحقق مما إذا كان المستخدم هو حساب الأدمن الأعلى"""
+    if not user or user.role != models.UserRole.ADMIN:
+        return False
+    if bool(getattr(user, "is_founding_admin", False)):
+        return True
+    supreme = get_supreme_admin(db)
+    return bool(supreme and supreme.id == user.id)
+
+
+def get_effective_device_limit(user: models.User) -> int:
+    """الحد الأقصى للأجهزة المسموح بها للحساب (افتراضياً 5 للأدمن و 2 للعميل)"""
+    custom_limit = getattr(user, "max_devices", None)
+    if custom_limit is not None and int(custom_limit) >= 1:
+        return int(custom_limit)
+    return 5 if user.role == models.UserRole.ADMIN else 2
+
+
+def check_and_register_device_for_login(
+    db: Session,
+    user: models.User,
+    device_id: str,
+    user_agent: Optional[str] = None,
+    ip_address: Optional[str] = None,
+) -> tuple[bool, Optional[str], Optional[models.UserDevice]]:
+    """
+    التحقق الموحد من قفل وحظر الأجهزة والحد الأقصى المسموح به قبل إصدار توكن الدخول.
+    يُرجع (allowed, error_message, device_obj).
+    """
+    clean_dev = (device_id or "web-unknown").strip()[:255] or "web-unknown"
+    devices = get_user_devices(db, user.id)
+    limit = get_effective_device_limit(user)
+    existing = next((d for d in devices if d.device_id == clean_dev), None)
+
+    if existing:
+        if existing.is_blocked:
+            return False, "عذراً، هذا الجهاز محظور من دخول المنصة", existing
+    else:
+        unblocked_count = sum(1 for d in devices if not d.is_blocked)
+        if unblocked_count >= limit:
+            unit_label = "جهاز واحد" if limit == 1 else f"{limit} أجهزة"
+            return (
+                False,
+                f"تم الوصول للحد الأقصى للأجهزة المسموح بها لهذا الحساب ({unit_label}). يرجى إنهاء جلسة أو إزالة جهاز من الإعدادات أولاً.",
+                None,
+            )
+
+    dev_obj = register_user_device(db, user.id, clean_dev, user_agent, ip_address)
+    return True, None, dev_obj
+
+
+def create_user_session(
+    db: Session,
+    user: models.User,
+    device_id: str,
+    user_agent: Optional[str] = None,
+    ip_address: Optional[str] = None,
+    login_surface: str = "web",
+) -> models.UserSession:
+    """إنشاء جلسة نشطة مرتبطة بالتوكن لإدارة الجلسات وإبطالها لحظياً"""
+    now = datetime.utcnow()
+    sess = models.UserSession(
+        session_id=uuid.uuid4().hex,
+        user_id=user.id,
+        device_id=(device_id or "web-unknown").strip()[:255] or "web-unknown",
+        user_agent=(user_agent or "")[:500] or None,
+        ip_address=(ip_address or "")[:100] or None,
+        login_surface=(login_surface or "web")[:50],
+        is_active=True,
+        created_at=now,
+        last_seen_at=now,
+    )
+    db.add(sess)
+    db.commit()
+    db.refresh(sess)
+    return sess
+
+
+def list_active_sessions(db: Session, user_id: int) -> list[models.UserSession]:
+    """جلب كافة الجلسات النشطة للمستخدم مرتبة حسب أحدث نشاط"""
+    return (
+        db.query(models.UserSession)
+        .filter(models.UserSession.user_id == user_id, models.UserSession.is_active == True)
+        .order_by(models.UserSession.last_seen_at.desc(), models.UserSession.id.desc())
+        .all()
+    )
+
+
+def revoke_session(
+    db: Session,
+    user_id: int,
+    session_id: str,
+    release_device: bool = True,
+    block_device: bool = False,
+) -> Optional[models.UserSession]:
+    """إنهاء جلسة محددة وإبطال التوكن المرتبط بها فوراً"""
+    sess = (
+        db.query(models.UserSession)
+        .filter(models.UserSession.user_id == user_id, models.UserSession.session_id == session_id)
+        .first()
+    )
+    if not sess:
+        return None
+
+    sess.is_active = False
+    sess.revoked_at = datetime.utcnow()
+    db.flush()
+
+    if block_device:
+        dev = (
+            db.query(models.UserDevice)
+            .filter(models.UserDevice.user_id == user_id, models.UserDevice.device_id == sess.device_id)
+            .first()
+        )
+        if dev:
+            dev.is_blocked = True
+    elif release_device:
+        remaining = (
+            db.query(models.UserSession)
+            .filter(
+                models.UserSession.user_id == user_id,
+                models.UserSession.device_id == sess.device_id,
+                models.UserSession.is_active == True,
+            )
+            .count()
+        )
+        if remaining == 0:
+            db.query(models.UserDevice).filter(
+                models.UserDevice.user_id == user_id,
+                models.UserDevice.device_id == sess.device_id,
+                models.UserDevice.is_blocked == False,
+            ).delete(synchronize_session=False)
+
+    db.commit()
+    return sess
+
+
+def revoke_all_user_sessions(
+    db: Session,
+    user_id: int,
+    except_session_id: Optional[str] = None,
+    release_devices: bool = True,
+    except_device_id: Optional[str] = None,
+) -> int:
+    """إنهاء جميع الجلسات النشطة للمستخدم (ما عدا الجلسة الحالية إن طُلب)"""
+    now = datetime.utcnow()
+    q = db.query(models.UserSession).filter(
+        models.UserSession.user_id == user_id,
+        models.UserSession.is_active == True,
+    )
+    if except_session_id:
+        q = q.filter(models.UserSession.session_id != except_session_id)
+
+    sessions_to_revoke = q.all()
+    for sess in sessions_to_revoke:
+        sess.is_active = False
+        sess.revoked_at = now
+    db.flush()
+
+    if release_devices:
+        active_dev_ids = {
+            row[0]
+            for row in db.query(models.UserSession.device_id)
+            .filter(models.UserSession.user_id == user_id, models.UserSession.is_active == True)
+            .all()
+        }
+        if except_device_id:
+            active_dev_ids.add(except_device_id)
+
+        dev_q = db.query(models.UserDevice).filter(
+            models.UserDevice.user_id == user_id,
+            models.UserDevice.is_blocked == False,
+        )
+        if active_dev_ids:
+            dev_q = dev_q.filter(~models.UserDevice.device_id.in_(active_dev_ids))
+        dev_q.delete(synchronize_session=False)
+
+    db.commit()
+    return len(sessions_to_revoke)
+
+
+def enforce_device_limit_on_update(
+    db: Session,
+    user: models.User,
+    new_limit: int,
+    current_device_id: Optional[str] = None,
+) -> int:
+    """تطبيق الحد الجديد للأجهزة فوراً وطرد الأجهزة/الجلسات الأقدم الزائدة"""
+    devices = (
+        db.query(models.UserDevice)
+        .filter(models.UserDevice.user_id == user.id, models.UserDevice.is_blocked == False)
+        .order_by(models.UserDevice.last_login.desc(), models.UserDevice.id.desc())
+        .all()
+    )
+    if len(devices) <= new_limit:
+        return 0
+
+    kept_ids: list[str] = []
+    if current_device_id and any(d.device_id == current_device_id for d in devices):
+        kept_ids.append(current_device_id)
+
+    for d in devices:
+        if len(kept_ids) >= new_limit:
+            break
+        if d.device_id not in kept_ids:
+            kept_ids.append(d.device_id)
+
+    excess_dev_ids = [d.device_id for d in devices if d.device_id not in kept_ids]
+    if not excess_dev_ids:
+        return 0
+
+    now = datetime.utcnow()
+    db.query(models.UserSession).filter(
+        models.UserSession.user_id == user.id,
+        models.UserSession.device_id.in_(excess_dev_ids),
+        models.UserSession.is_active == True,
+    ).update({"is_active": False, "revoked_at": now}, synchronize_session=False)
+
+    db.query(models.UserDevice).filter(
+        models.UserDevice.user_id == user.id,
+        models.UserDevice.device_id.in_(excess_dev_ids),
+    ).delete(synchronize_session=False)
+
+    db.commit()
+    return len(excess_dev_ids)
+

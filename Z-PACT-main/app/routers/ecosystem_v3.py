@@ -27,7 +27,12 @@ from sqlalchemy import desc, func
 from sqlalchemy.orm import Session
 
 from app import crud, models, schemas
-from app.auth import create_access_token, decode_access_token
+from app.auth import (
+    authenticate_token,
+    create_access_token,
+    decode_access_token,
+    issue_tracked_session_token,
+)
 from app.config import settings, stamp_settings
 from app.database import get_db
 from app.formatting import clean_phone_number
@@ -107,16 +112,13 @@ def require_admin_or_internal(
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
         token = auth_header.split(" ", 1)[1].strip()
-        payload = decode_access_token(token)
-        if payload:
-            user = crud.get_user_by_id(db, int(payload.get("sub", 0)))
-            if (
-                user
-                and user.is_active
-                and user.role == UserRole.ADMIN
-                and getattr(user, "approval_status", "approved") in (None, "approved")
-            ):
-                return user
+        user, err_status, err_detail = authenticate_token(db, token, touch_session=True)
+        if not user:
+            if err_status == status.HTTP_401_UNAUTHORIZED:
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=err_detail or "انتهت صلاحية الجلسة")
+            raise HTTPException(status_code=err_status, detail=err_detail or "غير مصرح")
+        if user.role == UserRole.ADMIN:
+            return user
 
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="غير مصرح — خاص بإدارة المنصة المعتمدة فقط")
 
@@ -134,17 +136,13 @@ def require_founding_admin_or_internal(
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
         token = auth_header.split(" ", 1)[1].strip()
-        payload = decode_access_token(token)
-        if payload:
-            user = crud.get_user_by_id(db, int(payload.get("sub", 0)))
-            if (
-                user
-                and user.is_active
-                and user.role == UserRole.ADMIN
-                and getattr(user, "approval_status", "approved") in (None, "approved")
-                and bool(getattr(user, "is_founding_admin", False))
-            ):
-                return user
+        user, err_status, err_detail = authenticate_token(db, token, touch_session=True)
+        if not user:
+            if err_status == status.HTTP_401_UNAUTHORIZED:
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=err_detail or "انتهت صلاحية الجلسة")
+            raise HTTPException(status_code=err_status, detail=err_detail or "غير مصرح")
+        if user.role == UserRole.ADMIN and crud.is_supreme_admin(db, user):
+            return user
 
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
@@ -214,11 +212,9 @@ def get_optional_jwt_user(request: Request, db: Session) -> Optional[User]:
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
         token = auth_header.split(" ", 1)[1].strip()
-        payload = decode_access_token(token)
-        if payload:
-            u = crud.get_user_by_id(db, int(payload.get("sub", 0)))
-            if u and u.is_active and getattr(u, "approval_status", "approved") in (None, "approved"):
-                return u
+        u, _, _ = authenticate_token(db, token, touch_session=True)
+        if u:
+            return u
     return None
 
 
@@ -481,12 +477,20 @@ def setup_founding_admin_password(
         "ip_address": ip_addr,
     })
 
-    token = create_access_token(user_id=target_admin.id, role=target_admin.role.value)
+    token, _ = issue_tracked_session_token(
+        db=db,
+        user=target_admin,
+        device_id=device_id,
+        request=request,
+        login_surface="native_apk",
+    )
+    user_out = schemas.UserOut.model_validate(target_admin)
+    user_out.is_supreme_admin = True
     return {
         "status": "approved",
         "access_token": token,
         "token_type": "bearer",
-        "user": schemas.UserOut.model_validate(target_admin).model_dump(mode="json"),
+        "user": user_out.model_dump(mode="json"),
         "message": "👑 تم تعيين كلمة السر السيادية لأول أدمن بنجاح!",
     }
 
@@ -530,23 +534,25 @@ def admin_password_only_login(
     if not matched_admin.is_active or getattr(matched_admin, "approval_status", "approved") != "approved":
         raise HTTPException(status_code=403, detail="⛔ تم رفض أو إيقاف صلاحية حساب الأدمن هذا من قبل أول أدمن.")
 
-    # تسجيل / تحديث الجهاز
-    devices = crud.get_user_devices(db, matched_admin.id)
-    existing_dev = next((d for d in devices if d.device_id == device_id), None)
-    if existing_dev:
-        if existing_dev.is_blocked:
-            raise HTTPException(status_code=403, detail="⛔ هذا الجهاز محظور أمنياً من قبل أول أدمن.")
-        existing_dev.last_login = datetime.utcnow()
-        existing_dev.last_ip = ip_addr
-        db.commit()
-    else:
-        crud.register_user_device(
-            db=db,
-            user_id=matched_admin.id,
+    # التحقق من الحد الأقصى للأجهزة وحظر الجهاز وتسجيله
+    allowed, err_msg, _ = crud.check_and_register_device_for_login(
+        db=db,
+        user=matched_admin,
+        device_id=device_id,
+        user_agent=request.headers.get("User-Agent"),
+        ip_address=ip_addr,
+    )
+    if not allowed:
+        db.add(AdminSecurityEvent(
+            admin_id=matched_admin.id,
+            event_type="ADMIN_LOGIN_BLOCKED_DEVICE_LIMIT",
+            admin_label=matched_admin.admin_label or matched_admin.full_name,
             device_id=device_id,
-            user_agent=request.headers.get("User-Agent"),
-            ip=ip_addr,
-        )
+            ip_address=ip_addr,
+            details=err_msg,
+        ))
+        db.commit()
+        raise HTTPException(status_code=403, detail=err_msg)
 
     expected_key = getattr(settings, "INTERNAL_SERVICE_KEY", "zpact_internal_bridge_secret_key_2026")
     is_native_apk = (request.headers.get("X-Admin-App-Proof") == expected_key) and device_id.upper().startswith("ZP-ADM-")
@@ -560,13 +566,22 @@ def admin_password_only_login(
         is_native_admin_apk=is_native_apk,
     )
 
-    token = create_access_token(user_id=matched_admin.id, role=matched_admin.role.value)
+    token, _ = issue_tracked_session_token(
+        db=db,
+        user=matched_admin,
+        device_id=device_id,
+        request=request,
+        login_surface="native_apk" if is_native_apk else "web_vault",
+    )
+    user_out = schemas.UserOut.model_validate(matched_admin)
+    user_out.is_supreme_admin = crud.is_supreme_admin(db, matched_admin)
     return {
         "status": "approved",
         "access_token": token,
         "token_type": "bearer",
         "is_founding_admin": bool(matched_admin.is_founding_admin),
-        "user": schemas.UserOut.model_validate(matched_admin).model_dump(mode="json"),
+        "is_supreme_admin": user_out.is_supreme_admin,
+        "user": user_out.model_dump(mode="json"),
     }
 
 
@@ -681,15 +696,29 @@ def poll_co_admin_approval(
 
     if co.approval_status == "approved" and co.is_active:
         ip_addr = request.client.host if request.client else "unknown"
-        devices = crud.get_user_devices(db, co.id)
-        if not any(d.device_id == device_id for d in devices):
-            crud.register_user_device(db, co.id, device_id, request.headers.get("User-Agent"), ip_addr)
+        allowed, err_msg, _ = crud.check_and_register_device_for_login(
+            db=db,
+            user=co,
+            device_id=device_id,
+            user_agent=request.headers.get("User-Agent"),
+            ip_address=ip_addr,
+        )
+        if not allowed:
+            raise HTTPException(status_code=403, detail=err_msg)
         _record_and_alert_admin_login(db, co, device_id, ip_addr, is_native_admin_apk=True)
-        token = create_access_token(user_id=co.id, role=co.role.value)
+        token, _ = issue_tracked_session_token(
+            db=db,
+            user=co,
+            device_id=device_id,
+            request=request,
+            login_surface="native_apk",
+        )
+        user_out = schemas.UserOut.model_validate(co)
+        user_out.is_supreme_admin = crud.is_supreme_admin(db, co)
         return {
             "status": "approved",
             "access_token": token,
-            "user": schemas.UserOut.model_validate(co).model_dump(mode="json"),
+            "user": user_out.model_dump(mode="json"),
         }
 
     return {

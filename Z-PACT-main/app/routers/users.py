@@ -62,9 +62,12 @@ def update_user_me(data: schemas.UserUpdate, current_user: User = Depends(get_cu
         )
         db.add(audit_log)
 
+    from app import crud as _crud
     db.commit()
     db.refresh(current_user)
-    return current_user
+    user_out = schemas.UserOut.model_validate(current_user)
+    user_out.is_supreme_admin = _crud.is_supreme_admin(db, current_user)
+    return user_out
 
 
 @router.get("/me/preferences")
