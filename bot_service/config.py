@@ -106,24 +106,122 @@ class BotConfig:
     MINIAPP_URL: str = _DEFAULT_MINIAPP_URL
     MINIAPP_VERSION: str = str(int(time.time()))
     
-    # 6. مسارات التخزين
+    # 6. مسارات التخزين وسجل المشرفين وصلاحياتهم
     STORAGE_DIR: str = _resolve_bot_storage_dir()
     RECEIPTS_DIR: str = os.path.join(STORAGE_DIR, "receipts")
+    ADMINS_JSON_PATH: str = os.path.join(STORAGE_DIR, "bot_admins.json")
 
-    def add_admin(self, telegram_id: int):
-        """إضافة مدير جديد ديناميكياً أثناء تشغيل البوت وحفظه في التكوين"""
-        tid = int(telegram_id)
-        self.ADMIN_TELEGRAM_IDS.add(tid)
-        stamp_settings.register_admin_telegram_id(tid)
+    def _registry(self):
+        from bot_service.admin_permissions import AdminRegistry
+        reg = getattr(self, "_admin_registry_cache", None)
+        if reg is None or reg.json_path != self.ADMINS_JSON_PATH:
+            reg = AdminRegistry(self.ADMINS_JSON_PATH)
+            self._admin_registry_cache = reg
+        return reg
+
+    def is_owner_admin(self, telegram_id: int) -> bool:
+        """هل المستخدم من المشرفين الملاك المحميين."""
+        return self._registry().is_owner(telegram_id)
+
+    def _sync_admin_ids_env(self) -> None:
+        reg = self._registry()
+        merged = set(self.ADMIN_TELEGRAM_IDS) | reg.all_ids()
+        self.ADMIN_TELEGRAM_IDS = merged
+        for x in merged:
+            stamp_settings.register_admin_telegram_id(x)
         try:
             ids_csv = ",".join(str(x) for x in sorted(self.ADMIN_TELEGRAM_IDS))
             self._persist_env("ADMIN_TELEGRAM_IDS", ids_csv)
         except Exception:
             pass
 
+    def add_admin(self, telegram_id: int, label: str = None, added_by: int = None):
+        """إضافة مشرف بكامل الصلاحيات (أو حفظ صلاحياته الحالية إن كان مسجلاً)."""
+        from bot_service.admin_permissions import full_permissions_dict
+        tid = int(telegram_id)
+        existing = self._registry().get_record(tid)
+        perms = existing["permissions"] if existing else full_permissions_dict()
+        self.set_admin_with_permissions(
+            tid,
+            perms,
+            label=label or (existing["label"] if existing else None),
+            added_by=added_by,
+        )
+
+    def set_admin_with_permissions(
+        self,
+        telegram_id: int,
+        permissions: dict,
+        label: str = None,
+        added_by: int = None,
+    ) -> dict:
+        """إضافة أو تحديث صلاحيات مشرف وحفظها في bot_admins.json و.env."""
+        tid = int(telegram_id)
+        rec = self._registry().set_admin(tid, permissions, label=label, added_by=added_by)
+        self.ADMIN_TELEGRAM_IDS.add(tid)
+        stamp_settings.register_admin_telegram_id(tid)
+        self._sync_admin_ids_env()
+        return rec
+
+    def remove_admin(self, telegram_id: int) -> bool:
+        """سحب صلاحيات مشرف مضاف وإزالته نهائياً (مع حماية الملاك الرئيسيين)."""
+        tid = int(telegram_id)
+        if self.is_owner_admin(tid):
+            return False
+        removed_from_reg = self._registry().remove_admin(tid)
+        was_in_set = tid in self.ADMIN_TELEGRAM_IDS
+        if not removed_from_reg and not was_in_set:
+            return False
+        self.ADMIN_TELEGRAM_IDS.discard(tid)
+        stamp_settings.unregister_admin_telegram_id(tid)
+        self._sync_admin_ids_env()
+        return True
+
+    def list_managed_admins(self) -> list:
+        """إرجاع قائمة المشرفين المضافين وصلاحياتهم."""
+        return self._registry().list_records()
+
+    def get_admin_record(self, telegram_id: int):
+        return self._registry().get_record(telegram_id)
+
+    def get_admin_permissions(self, telegram_id: int) -> dict:
+        """إرجاع قاموس الصلاحيات الفعلية للمشرف."""
+        from bot_service.admin_permissions import PERM_KEYS, full_permissions_dict
+        try:
+            tid = int(telegram_id)
+        except (TypeError, ValueError):
+            return {k: False for k in PERM_KEYS}
+        if self.is_owner_admin(tid):
+            return full_permissions_dict()
+        rec = self._registry().get_record(tid)
+        if rec is not None:
+            return rec["permissions"]
+        if tid in self.ADMIN_TELEGRAM_IDS or stamp_settings.is_admin_telegram_id(tid):
+            return full_permissions_dict()
+        return {k: False for k in PERM_KEYS}
+
+    def has_permission(self, telegram_id: int, permission: str) -> bool:
+        """التحقق من امتلاك المشرف لصلاحية معينة."""
+        if not self.is_admin(telegram_id):
+            return False
+        return bool(self.get_admin_permissions(telegram_id).get(permission, False))
+
+    def get_admins_for_permission(self, permission: str) -> list:
+        """إرجاع معرفات المشرفين المصرح لهم باستلام/تنفيذ صلاحية معينة."""
+        candidates = set(self.ADMIN_TELEGRAM_IDS) | self._registry().all_ids()
+        return sorted(uid for uid in candidates if self.has_permission(uid, permission))
+
     def is_admin(self, telegram_id: int) -> bool:
-        """التحقق هل المستخدم مدير"""
-        return telegram_id in self.ADMIN_TELEGRAM_IDS or stamp_settings.is_admin_telegram_id(telegram_id)
+        """التحقق هل المستخدم مدير (مالك رئيسي أو مشرف مضاف بصلاحيات)."""
+        try:
+            tid = int(telegram_id)
+        except (TypeError, ValueError):
+            return False
+        if self.is_owner_admin(tid):
+            return True
+        if self._registry().get_record(tid) is not None:
+            return True
+        return tid in self.ADMIN_TELEGRAM_IDS or stamp_settings.is_admin_telegram_id(tid)
 
     def update_wallet(self, new_wallet: str):
         """تحديث رقم المحفظة وحفظه في الإعدادات وملف .env"""

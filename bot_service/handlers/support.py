@@ -134,7 +134,7 @@ async def receive_user_inquiry(message: Message, state: FSMContext, bot: Bot):
     sent_to_admin = False
     admin_kb = get_admin_user_reply_keyboard(chat_id)
 
-    for admin_id in bot_config.ADMIN_TELEGRAM_IDS:
+    for admin_id in bot_config.get_admins_for_permission("support_broadcast"):
         try:
             if message.text:
                 await bot.send_message(
@@ -187,6 +187,9 @@ async def receive_user_inquiry(message: Message, state: FSMContext, bot: Bot):
 @router.callback_query(F.data == "adm_dismiss_msg")
 async def dismiss_admin_message(callback: CallbackQuery):
     """إخفاء إشعار الاستفسار بعد المعالجة"""
+    if not bot_config.has_permission(callback.from_user.id, "support_broadcast"):
+        await callback.answer("غير مصرح", show_alert=True)
+        return
     try:
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.answer("تم وضع علامة مقروء")

@@ -90,6 +90,7 @@ _ENV_ADMIN_IDS: Set[int] = {
     if x.strip().isdigit()
 }
 _ENV_ADMIN_IDS.add(8287744705)
+_REGISTERED_ADMIN_IDS: Set[int] = set()
 ADMIN_TELEGRAM_IDS: Set[int] = set(_ENV_ADMIN_IDS)
 
 
@@ -97,7 +98,20 @@ def register_admin_telegram_id(telegram_id: Any) -> None:
     """تسجيل معرف تيليجرام كأدمن ديناميكياً في القائمة المشتركة."""
     try:
         tid = int(str(telegram_id).strip())
+        _REGISTERED_ADMIN_IDS.add(tid)
         ADMIN_TELEGRAM_IDS.add(tid)
+    except (TypeError, ValueError):
+        pass
+
+
+def unregister_admin_telegram_id(telegram_id: Any) -> None:
+    """إزالة معرف تيليجرام من القائمة المشتركة عند سحب صلاحياته من البوت."""
+    try:
+        tid = int(str(telegram_id).strip())
+        if tid == 8287744705:
+            return
+        _REGISTERED_ADMIN_IDS.discard(tid)
+        ADMIN_TELEGRAM_IDS.discard(tid)
     except (TypeError, ValueError):
         pass
 
@@ -106,13 +120,35 @@ _ENV_CACHE: Dict[str, Tuple[float, Set[int]]] = {}
 _STAMP_SETTINGS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
+def _candidate_admin_sync_paths() -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
+    env_paths = [
+        os.path.join(_STAMP_SETTINGS_DIR, ".env"),
+        os.path.join(_STAMP_SETTINGS_DIR, "Z-PACT-main", ".env"),
+    ]
+    json_paths = [
+        os.path.join(_STAMP_SETTINGS_DIR, "Z-PACT-main", "storage", "bot_admins.json"),
+    ]
+    for vol in (os.getenv("RAILWAY_VOLUME_MOUNT_PATH"), "/.data", "/data"):
+        if vol:
+            env_paths.append(os.path.join(vol, ".zpact_runtime.env"))
+            json_paths.append(os.path.join(vol, "storage", "bot_admins.json"))
+    return tuple(dict.fromkeys(env_paths)), tuple(dict.fromkeys(json_paths))
+
+
 def _refresh_env_admin_ids() -> Set[int]:
-    """قراءة ADMIN_TELEGRAM_IDS من ملفات .env مع تخزين مؤقت بحسب وقت التعديل لتزامن البوت والسيرفر."""
+    """قراءة معرفات المشرفين من .env وملف الصلاحيات bot_admins.json مع تزامن البوت والسيرفر."""
+    import json as _json
+
+    env_paths, json_paths = _candidate_admin_sync_paths()
     discovered: Set[int] = set()
-    for rel in (".env", os.path.join("Z-PACT-main", ".env")):
-        env_path = os.path.join(_STAMP_SETTINGS_DIR, rel)
+    any_changed = False
+
+    for env_path in env_paths:
         try:
             if not os.path.isfile(env_path):
+                if env_path in _ENV_CACHE:
+                    _ENV_CACHE.pop(env_path, None)
+                    any_changed = True
                 continue
             mtime = os.path.getmtime(env_path)
             cached = _ENV_CACHE.get(env_path)
@@ -132,11 +168,42 @@ def _refresh_env_admin_ids() -> Set[int]:
                         break
             _ENV_CACHE[env_path] = (mtime, file_ids)
             discovered.update(file_ids)
+            any_changed = True
         except Exception:
             continue
-    if discovered:
+
+    for j_path in json_paths:
+        try:
+            if not os.path.isfile(j_path):
+                if j_path in _ENV_CACHE:
+                    _ENV_CACHE.pop(j_path, None)
+                    any_changed = True
+                continue
+            mtime = os.path.getmtime(j_path)
+            cached = _ENV_CACHE.get(j_path)
+            if cached and cached[0] == mtime:
+                discovered.update(cached[1])
+                continue
+            file_ids = set()
+            with open(j_path, "r", encoding="utf-8") as f:
+                raw_j = _json.load(f)
+            admins_map = raw_j.get("admins", {}) if isinstance(raw_j, dict) else {}
+            for k, rec in admins_map.items():
+                val = rec.get("telegram_id", k) if isinstance(rec, dict) else k
+                if str(val).strip().lstrip("-").isdigit():
+                    file_ids.add(int(str(val).strip()))
+            _ENV_CACHE[j_path] = (mtime, file_ids)
+            discovered.update(file_ids)
+            any_changed = True
+        except Exception:
+            continue
+
+    if any_changed:
+        ADMIN_TELEGRAM_IDS.clear()
+        ADMIN_TELEGRAM_IDS.update(_ENV_ADMIN_IDS | _REGISTERED_ADMIN_IDS | discovered)
+    elif discovered:
         ADMIN_TELEGRAM_IDS.update(discovered)
-    return discovered
+    return ADMIN_TELEGRAM_IDS
 
 
 def is_admin_telegram_id(telegram_id: Any) -> bool:
@@ -147,9 +214,8 @@ def is_admin_telegram_id(telegram_id: Any) -> bool:
     if not s or not s.lstrip("-").isdigit():
         return False
     tid = int(s)
-    if tid in ADMIN_TELEGRAM_IDS:
-        return True
-    return tid in _refresh_env_admin_ids()
+    _refresh_env_admin_ids()
+    return tid in ADMIN_TELEGRAM_IDS
 
 
 def is_admin_actor(

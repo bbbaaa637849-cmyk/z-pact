@@ -230,6 +230,17 @@ async def process_otp_contact_verification(message: Message, state: FSMContext):
 
 
 
+@router.message(Command("id", "myid"))
+async def handle_show_telegram_id(message: Message):
+    """عرض معرف تيليجرام الرقمي للمستخدم ليسهل نسخه وإضافته كمشرف."""
+    uid = message.from_user.id
+    await message.answer(
+        f"🆔 <b>معرف حسابك في تيليجرام (ID):</b> <code>{uid}</code>\n"
+        f"<i>اضغط على الرقم لنسخه وإرساله للإدارة.</i>",
+        parse_mode="HTML",
+    )
+
+
 @router.message(Command("admin_auth"))
 async def handle_admin_auth(message: Message):
     """أمر المصادقة السريع للأدمن برمز المرور السري"""

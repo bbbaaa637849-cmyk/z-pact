@@ -24,6 +24,7 @@ from aiogram.types import (
     WebAppInfo,
 )
 
+from bot_service.admin_permissions import check_admin_perm
 from bot_service.config import BASE_DIR, bot_config
 from bot_service.services.batch_parser import (
     build_excel_template_bytes,
@@ -82,9 +83,7 @@ def _cleanup_temp_path(path: Optional[str]) -> None:
 @router.message(Command("templates"))
 @router.callback_query(F.data == "adm_view:download_templates")
 async def handle_send_batch_templates(event: Message | CallbackQuery):
-    if not _is_admin(event.from_user.id):
-        if isinstance(event, CallbackQuery):
-            await event.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(event, bot_config, "batch_vip"):
         return
 
     target_msg = event.message if isinstance(event, CallbackQuery) else event
@@ -133,12 +132,10 @@ _CATALOG_EXCEL_TEXT_TRIGGERS = {
 @router.message(Command("materials_excel"))
 @router.message(Command("خامات"))
 @router.callback_query(F.data == "adm_view:materials_excel")
-@router.message(StateFilter(None), lambda m: _is_admin(m.from_user.id) and (m.text or "").strip() in _CATALOG_EXCEL_TEXT_TRIGGERS)
+@router.message(StateFilter(None), lambda m: bot_config.has_permission(m.from_user.id, "batch_vip") and (m.text or "").strip() in _CATALOG_EXCEL_TEXT_TRIGGERS)
 async def handle_send_materials_catalog_excel(event: Message | CallbackQuery):
     """إرسال ملف Excel منظم بالخامات والمذكرات الحالية وأسمائها المضبوطة للأدمن عند طلبه."""
-    if not _is_admin(event.from_user.id):
-        if isinstance(event, CallbackQuery):
-            await event.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(event, bot_config, "batch_vip"):
         return
 
     target_msg = event.message if isinstance(event, CallbackQuery) else event
@@ -168,9 +165,7 @@ async def handle_send_materials_catalog_excel(event: Message | CallbackQuery):
 @router.message(Command("batch"))
 @router.callback_query(F.data == "adm_view:batch_help")
 async def handle_batch_help(event: Message | CallbackQuery):
-    if not _is_admin(event.from_user.id):
-        if isinstance(event, CallbackQuery):
-            await event.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(event, bot_config, "batch_vip"):
         return
 
     target_msg = event.message if isinstance(event, CallbackQuery) else event
@@ -198,8 +193,7 @@ async def handle_batch_help(event: Message | CallbackQuery):
 
 @router.callback_query(F.data == "adm_batch:paste_text")
 async def handle_batch_paste_start(callback: CallbackQuery, state: FSMContext):
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(callback, bot_config, "batch_vip"):
         return
     await state.set_state(AdminBatchStampStates.waiting_batch_text)
     await callback.message.answer(
@@ -419,7 +413,8 @@ async def _safe_report_wait_error(
     F.document,
 )
 async def handle_idle_admin_batch_document(message: Message, state: FSMContext):
-    if not _is_admin(message.from_user.id):
+    uid = message.from_user.id
+    if not _is_admin(uid):
         return
     doc = message.document
     fname = (doc.file_name or "").lower()
@@ -427,8 +422,12 @@ async def handle_idle_admin_batch_document(message: Message, state: FSMContext):
         if fname.endswith((".png", ".jpg", ".jpeg", ".webp")):
             cap = (message.caption or "").lower()
             if any(k in cap for k in ("إطار", "اطار", "برواز", "frame")):
+                if not await check_admin_perm(message, bot_config, "studio_fonts"):
+                    return
                 raw = await _download_telegram_bytes(message.bot, doc.file_id)
                 await _prompt_attach_frame_to_material(message, state, raw, doc.file_name or "frame.png")
+        return
+    if not await check_admin_perm(message, bot_config, "batch_vip"):
         return
 
     wait_msg = await message.answer("🔍 جاري قراءة وتحليل ملف البيانات ومطابقة أسماء المذكرات...")
@@ -456,16 +455,17 @@ async def handle_idle_admin_frame_photo(message: Message, state: FSMContext):
         return
     cap = (message.caption or "").lower()
     if any(k in cap for k in ("إطار", "اطار", "برواز", "frame")):
+        if not await check_admin_perm(message, bot_config, "studio_fonts"):
+            return
         raw = await _download_telegram_bytes(message.bot, message.photo[-1].file_id)
         await _prompt_attach_frame_to_material(message, state, raw, "frame.png")
 
 
 @router.message(AdminBatchStampStates.waiting_batch_text)
 async def process_batch_pasted_text(message: Message, state: FSMContext):
-    if not _is_admin(message.from_user.id):
-        await state.clear()
+    if not await check_admin_perm(message, bot_config, "batch_vip", state=state):
         return
-    entries = parse_text_teacher_entries(message.text or "", is_admin=_is_admin(message.from_user.id))
+    entries = parse_text_teacher_entries(message.text or "", is_admin=True)
     await _prepare_and_show_batch_review(message, state, entries, "قائمة نصية")
 
 
@@ -675,8 +675,7 @@ async def handle_batch_logo_back(callback: CallbackQuery, state: FSMContext):
 
 @router.message(AdminBatchStampStates.waiting_batch_logo, F.photo | F.document)
 async def handle_batch_logo_received(message: Message, state: FSMContext):
-    if not _is_admin(message.from_user.id):
-        await state.clear()
+    if not await check_admin_perm(message, bot_config, "batch_vip", state=state):
         return
 
     if message.document and not message.photo:
@@ -732,8 +731,7 @@ async def handle_batch_logo_received(message: Message, state: FSMContext):
 
 @router.message(AdminBatchStampStates.waiting_batch_frame, F.photo | F.document)
 async def handle_batch_frame_received(message: Message, state: FSMContext):
-    if not _is_admin(message.from_user.id):
-        await state.clear()
+    if not await check_admin_perm(message, bot_config, "batch_vip", state=state):
         return
 
     file_id = message.photo[-1].file_id if message.photo else message.document.file_id
@@ -766,8 +764,7 @@ async def handle_batch_frame_received(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "adm_batch:run", AdminBatchStampStates.reviewing_batch)
 async def handle_batch_execute_sequential(callback: CallbackQuery, state: FSMContext):
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(callback, bot_config, "batch_vip"):
         return
 
     data = await state.get_data()
@@ -915,8 +912,7 @@ async def handle_batch_execute_sequential(callback: CallbackQuery, state: FSMCon
 
 @router.callback_query(F.data == "adm_mat_upload")
 async def handle_full_material_upload_start(callback: CallbackQuery, state: FSMContext):
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(callback, bot_config, "materials"):
         return
     await state.set_state(AdminMaterialManageStates.uploading_pdf)
     await callback.message.answer(
@@ -929,8 +925,7 @@ async def handle_full_material_upload_start(callback: CallbackQuery, state: FSMC
 
 @router.message(AdminMaterialManageStates.uploading_pdf, F.document)
 async def process_full_material_pdf(message: Message, state: FSMContext):
-    if not _is_admin(message.from_user.id):
-        await state.clear()
+    if not await check_admin_perm(message, bot_config, "materials", state=state):
         return
     doc = message.document
     if not (doc.file_name or "").lower().endswith(".pdf"):
@@ -1153,8 +1148,7 @@ async def cancel_idle_frame(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("adm_apply_idle_frame:"))
 async def apply_idle_frame_to_mat(callback: CallbackQuery, state: FSMContext):
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(callback, bot_config, "studio_fonts"):
         return
     mat_id = int(callback.data.split(":")[1])
     data = await state.get_data()
@@ -1188,8 +1182,7 @@ async def apply_idle_frame_to_mat(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("adm_mat_frame:"))
 async def handle_mat_frame_start(callback: CallbackQuery, state: FSMContext):
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(callback, bot_config, "studio_fonts"):
         return
     mat_id = int(callback.data.split(":")[1])
     await state.set_state(AdminMaterialManageStates.waiting_frame_image)
@@ -1204,8 +1197,7 @@ async def handle_mat_frame_start(callback: CallbackQuery, state: FSMContext):
 
 @router.message(AdminMaterialManageStates.waiting_frame_image, F.photo | F.document)
 async def process_mat_frame_upload(message: Message, state: FSMContext):
-    if not _is_admin(message.from_user.id):
-        await state.clear()
+    if not await check_admin_perm(message, bot_config, "studio_fonts", state=state):
         return
     data = await state.get_data()
     mat_id = int(data.get("target_material_id"))
@@ -1233,8 +1225,7 @@ async def process_mat_frame_upload(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("adm_mat_frame_del:"))
 async def handle_mat_frame_delete(callback: CallbackQuery):
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(callback, bot_config, "studio_fonts"):
         return
     mat_id = int(callback.data.split(":")[1])
     ok = await bridge_client.delete_material_frame(mat_id)
@@ -1371,8 +1362,7 @@ async def _send_or_refresh_studio_preview(
 
 @router.callback_query(F.data.startswith("adm_mat_dl_orig:"))
 async def handle_mat_download_original(callback: CallbackQuery):
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(callback, bot_config, "materials"):
         return
     mat_id = int(callback.data.split(":")[1])
     await callback.answer("⏳ جاري سحب الملف الأصلي من السيرفر...")
@@ -1398,8 +1388,7 @@ async def handle_mat_download_original(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("adm_mat_replace_pdf:"))
 async def handle_mat_replace_pdf_start(callback: CallbackQuery, state: FSMContext):
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(callback, bot_config, "materials"):
         return
     mat_id = int(callback.data.split(":")[1])
     materials = await bridge_client.get_materials(include_unpublished=True)
@@ -1427,8 +1416,7 @@ async def handle_mat_replace_pdf_start(callback: CallbackQuery, state: FSMContex
 
 @router.callback_query(F.data.startswith("adm_mat_replace_cancel:"))
 async def handle_mat_replace_pdf_cancel(callback: CallbackQuery, state: FSMContext):
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(callback, bot_config, "materials"):
         return
     await state.clear()
     mat_id = int(callback.data.split(":")[1])
@@ -1443,7 +1431,7 @@ async def handle_mat_replace_pdf_cancel(callback: CallbackQuery, state: FSMConte
 
 @router.message(AdminMaterialManageStates.waiting_replace_pdf)
 async def handle_mat_replace_pdf_receive(message: Message, state: FSMContext):
-    if not _is_admin(message.from_user.id):
+    if not await check_admin_perm(message, bot_config, "materials", state=state):
         return
 
     data = await state.get_data()
@@ -1509,8 +1497,7 @@ async def handle_mat_replace_pdf_receive(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "adm_view:font_settings")
 async def handle_font_settings_pick_material(callback: CallbackQuery):
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(callback, bot_config, "studio_fonts"):
         return
     materials = await bridge_client.get_materials(include_unpublished=True)
     usable = filter_usable_materials(materials)
@@ -1535,8 +1522,7 @@ async def handle_font_settings_pick_material(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("adm_mat_font:"))
 async def handle_open_font_studio(callback: CallbackQuery):
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(callback, bot_config, "studio_fonts"):
         return
     mat_id = int(callback.data.split(":")[1])
     await callback.answer("⏳ جاري تحميل المعاينة والتنسيق...")
@@ -1545,8 +1531,7 @@ async def handle_open_font_studio(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("adm_mat_preview:"))
 async def handle_material_preview_only(callback: CallbackQuery):
-    if not _is_admin(callback.from_user.id):
-        await callback.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(callback, bot_config, ("studio_fonts", "materials")):
         return
     parts = callback.data.split(":")
     mat_id = int(parts[1])
@@ -1565,6 +1550,8 @@ async def handle_material_preview_only(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("adm_fnt_tgt:"))
 async def handle_studio_switch_target(callback: CallbackQuery):
+    if not await check_admin_perm(callback, bot_config, "studio_fonts"):
+        return
     _, mid, tgt, pg = callback.data.split(":")
     await callback.answer(f"المستهدف: {tgt}")
     await _send_or_refresh_studio_preview(
@@ -1574,6 +1561,8 @@ async def handle_studio_switch_target(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("adm_fnt_fam:"))
 async def handle_studio_change_font_family(callback: CallbackQuery):
+    if not await check_admin_perm(callback, bot_config, "studio_fonts"):
+        return
     _, mid, tgt, fam, pg = callback.data.split(":")
     await callback.answer("⏳ جاري تطبيق الخط وتحديث المعاينة...")
     await bridge_client.quick_font_adjust(int(mid), {"target_type": tgt, "font_family": fam})
@@ -1584,6 +1573,8 @@ async def handle_studio_change_font_family(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("adm_fnt_adj:"))
 async def handle_studio_quick_adjust(callback: CallbackQuery):
+    if not await check_admin_perm(callback, bot_config, "studio_fonts"):
+        return
     _, mid, tgt, op, val_str, pg = callback.data.split(":")
     val = float(val_str)
     payload: Dict[str, Any] = {"target_type": tgt}
@@ -1603,6 +1594,8 @@ async def handle_studio_quick_adjust(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("adm_fnt_asksz:"))
 async def handle_studio_ask_custom_size(callback: CallbackQuery, state: FSMContext):
+    if not await check_admin_perm(callback, bot_config, "studio_fonts"):
+        return
     _, mid, tgt, pg = callback.data.split(":")
     await state.set_state(AdminFontSettingsStates.waiting_custom_font_size)
     await state.update_data(font_mat_id=int(mid), font_target=tgt, font_page=int(pg))
@@ -1615,8 +1608,7 @@ async def handle_studio_ask_custom_size(callback: CallbackQuery, state: FSMConte
 
 @router.message(AdminFontSettingsStates.waiting_custom_font_size)
 async def process_studio_custom_size(message: Message, state: FSMContext):
-    if not _is_admin(message.from_user.id):
-        await state.clear()
+    if not await check_admin_perm(message, bot_config, "studio_fonts", state=state):
         return
     try:
         sz = float((message.text or "").strip())

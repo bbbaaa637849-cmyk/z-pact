@@ -130,11 +130,20 @@ def get_admin_order_actions_keyboard(order_code: str, chat_id: str) -> InlineKey
     ])
 
 
-def get_admin_main_keyboard() -> InlineKeyboardMarkup:
-    """لوحة تحكم المشرف الرئيسية"""
+def _has_any_perm(user_id: Optional[int], required) -> bool:
+    """فحص صلاحية أو مجموعة صلاحيات للعرض الديناميكي في أزرار لوحة المشرف."""
+    if user_id is None or not required:
+        return True
+    if isinstance(required, str):
+        return bot_config.has_permission(user_id, required)
+    return any(bot_config.has_permission(user_id, r) for r in required)
+
+
+def get_admin_main_keyboard(user_id: Optional[int] = None) -> InlineKeyboardMarkup:
+    """لوحة تحكم المشرف الرئيسية (تعرض فقط الأقسام المصرح بها للمشرف)."""
     rows = []
     miniapp_url = bot_config.get_live_miniapp_url(cache_bust=True)
-    if miniapp_url.lower().startswith("https://"):
+    if miniapp_url.lower().startswith("https://") and _has_any_perm(user_id, ("apks_settings", "materials", "orders_finance")):
         rows.append([
             InlineKeyboardButton(
                 text="🚀 فتح المتجر والتطبيق التفاعلي (Mini App)",
@@ -142,47 +151,54 @@ def get_admin_main_keyboard() -> InlineKeyboardMarkup:
             )
         ])
 
-    rows.extend([
+    button_rows = [
         [
-            InlineKeyboardButton(text="📊 دفعة إكسيل / وورد (Batch)", callback_data="adm_view:batch_help"),
-            InlineKeyboardButton(text="⚡ ختم مباشر VIP", callback_data="adm_view:vip_stamp")
+            (InlineKeyboardButton(text="📊 دفعة إكسيل / وورد (Batch)", callback_data="adm_view:batch_help"), "batch_vip"),
+            (InlineKeyboardButton(text="⚡ ختم مباشر VIP", callback_data="adm_view:vip_stamp"), "batch_vip"),
         ],
         [
-            InlineKeyboardButton(text="🔤 الخطوط والأحجام والإطارات", callback_data="adm_view:font_settings"),
-            InlineKeyboardButton(text="📥 قوالب Excel و Word", callback_data="adm_view:download_templates")
+            (InlineKeyboardButton(text="🔤 الخطوط والأحجام والإطارات", callback_data="adm_view:font_settings"), "studio_fonts"),
+            (InlineKeyboardButton(text="📥 قوالب Excel و Word", callback_data="adm_view:download_templates"), "batch_vip"),
         ],
         [
-            InlineKeyboardButton(text="📚 إدارة المذكرات والأسعار", callback_data="adm_view:materials"),
-            InlineKeyboardButton(text="📗 إكسيل الخامات والأسماء", callback_data="adm_view:materials_excel")
+            (InlineKeyboardButton(text="📚 إدارة المذكرات والأسعار", callback_data="adm_view:materials"), "materials"),
+            (InlineKeyboardButton(text="📗 إكسيل الخامات والأسماء", callback_data="adm_view:materials_excel"), "batch_vip"),
         ],
         [
-            InlineKeyboardButton(text="➕ إضافة مذكرة بالتفاصيل", callback_data="adm_mat_upload"),
-            InlineKeyboardButton(text="📊 الإحصائيات اللحظية", callback_data="adm_view:stats")
+            (InlineKeyboardButton(text="➕ إضافة مذكرة بالتفاصيل", callback_data="adm_mat_upload"), "materials"),
+            (InlineKeyboardButton(text="📊 الإحصائيات اللحظية", callback_data="adm_view:stats"), "orders_finance"),
         ],
         [
-            InlineKeyboardButton(text="⏳ الطلبات المعلقة", callback_data="adm_view:pending")
+            (InlineKeyboardButton(text="⏳ الطلبات المعلقة", callback_data="adm_view:pending"), "orders_finance"),
         ],
         [
-            InlineKeyboardButton(text="🚀 المرسلون والعمولات والسيريال", callback_data="adm_view:v3_senders"),
-            InlineKeyboardButton(text="📲 بث تحديث هوائي OTA", callback_data="adm_view:push_ota")
+            (InlineKeyboardButton(text="🚀 المرسلون والعمولات والسيريال", callback_data="adm_view:v3_senders"), "senders_ota"),
+            (InlineKeyboardButton(text="📲 بث تحديث هوائي OTA", callback_data="adm_view:push_ota"), "senders_ota"),
         ],
         [
-            InlineKeyboardButton(text="📢 إذاعة عامة للمدرسين", callback_data="adm_view:broadcast"),
-            InlineKeyboardButton(text="📩 سجل رسائل الـ SMS", callback_data="adm_view:sms_feed")
+            (InlineKeyboardButton(text="📢 إذاعة عامة للمدرسين", callback_data="adm_view:broadcast"), "support_broadcast"),
+            (InlineKeyboardButton(text="📩 سجل رسائل الـ SMS", callback_data="adm_view:sms_feed"), "orders_finance"),
         ],
         [
-            InlineKeyboardButton(text="🛡️ تحميل تطبيق الأدمن والرادار (APK)", callback_data="adm_view:get_admin_apk")
+            (InlineKeyboardButton(text="👥 إدارة المشرفين والصلاحيات", callback_data="adm_view:admins"), "manage_admins"),
         ],
         [
-            InlineKeyboardButton(text="🎓 تحميل تطبيق المدرسين بدون أذونات (APK)", callback_data="adm_view:get_teacher_apk")
+            (InlineKeyboardButton(text="🛡️ تحميل تطبيق الأدمن والرادار (APK)", callback_data="adm_view:get_admin_apk"), "apks_settings"),
         ],
         [
-            InlineKeyboardButton(text="🚀 تحميل تطبيق المرسلين بدون أذونات (APK)", callback_data="adm_view:get_sender_apk")
+            (InlineKeyboardButton(text="🎓 تحميل تطبيق المدرسين بدون أذونات (APK)", callback_data="adm_view:get_teacher_apk"), "apks_settings"),
         ],
         [
-            InlineKeyboardButton(text="🔙 إغلاق اللوحة", callback_data="adm_close")
-        ]
-    ])
+            (InlineKeyboardButton(text="🚀 تحميل تطبيق المرسلين بدون أذونات (APK)", callback_data="adm_view:get_sender_apk"), "apks_settings"),
+        ],
+    ]
+
+    for row_spec in button_rows:
+        visible = [btn for btn, perm in row_spec if _has_any_perm(user_id, perm)]
+        if visible:
+            rows.append(visible)
+
+    rows.append([InlineKeyboardButton(text="🔙 إغلاق اللوحة", callback_data="adm_close")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -190,31 +206,42 @@ def get_admin_material_item_keyboard(
     material_id: int,
     is_published: bool,
     has_frame: bool = False,
+    user_id: Optional[int] = None,
 ) -> InlineKeyboardMarkup:
-    """أزرار التحكم بمذكرة محددة للأدمن (السعر، النشر، الخطوط، الإطار، المعاينة)"""
-    publish_text = "👁️ إخفاء من المتجر" if is_published else "🚀 نشر في المتجر"
-    frame_row = [InlineKeyboardButton(text="🖼️ رفع/تغيير إطار الصفحة", callback_data=f"adm_mat_frame:{material_id}")]
-    if has_frame:
-        frame_row.append(InlineKeyboardButton(text="🧹 حذف الإطار", callback_data=f"adm_mat_frame_del:{material_id}"))
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
+    """أزرار التحكم بمذكرة محددة للأدمن بحسب صلاحياته (السعر، النشر، الخطوط، الإطار، المعاينة)"""
+    can_fonts = _has_any_perm(user_id, "studio_fonts")
+    can_materials = _has_any_perm(user_id, "materials")
+    rows = []
+
+    if can_fonts:
+        rows.append([
             InlineKeyboardButton(text="🔤 ضبط الخط والأحجام والموقع", callback_data=f"adm_mat_font:{material_id}"),
-            InlineKeyboardButton(text="👁️ معاينة صفحة 1", callback_data=f"adm_mat_preview:{material_id}")
-        ],
-        [
+            InlineKeyboardButton(text="👁️ معاينة صفحة 1", callback_data=f"adm_mat_preview:{material_id}"),
+        ])
+    if can_materials:
+        rows.append([
             InlineKeyboardButton(text="📥 تحميل الأصل", callback_data=f"adm_mat_dl_orig:{material_id}"),
-            InlineKeyboardButton(text="📄 استبدال ملف الـ PDF", callback_data=f"adm_mat_replace_pdf:{material_id}")
-        ],
-        frame_row,
-        [
+            InlineKeyboardButton(text="📄 استبدال ملف الـ PDF", callback_data=f"adm_mat_replace_pdf:{material_id}"),
+        ])
+    if can_fonts:
+        frame_row = [InlineKeyboardButton(text="🖼️ رفع/تغيير إطار الصفحة", callback_data=f"adm_mat_frame:{material_id}")]
+        if has_frame:
+            frame_row.append(InlineKeyboardButton(text="🧹 حذف الإطار", callback_data=f"adm_mat_frame_del:{material_id}"))
+        rows.append(frame_row)
+    if can_materials:
+        publish_text = "👁️ إخفاء من المتجر" if is_published else "🚀 نشر في المتجر"
+        rows.append([
             InlineKeyboardButton(text="💵 تعديل السعر", callback_data=f"adm_mat_price:{material_id}"),
-            InlineKeyboardButton(text=publish_text, callback_data=f"adm_mat_toggle:{material_id}")
-        ],
-        [
+            InlineKeyboardButton(text=publish_text, callback_data=f"adm_mat_toggle:{material_id}"),
+        ])
+        rows.append([
             InlineKeyboardButton(text="🗑️ حذف المذكرة", callback_data=f"adm_mat_del:{material_id}"),
-            InlineKeyboardButton(text="🔙 رجوع للقائمة", callback_data="adm_view:materials")
-        ]
-    ])
+            InlineKeyboardButton(text="🔙 رجوع للقائمة", callback_data="adm_view:materials"),
+        ])
+    else:
+        rows.append([InlineKeyboardButton(text="🔙 رجوع للقائمة", callback_data="adm_view:materials")])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 

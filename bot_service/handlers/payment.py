@@ -229,7 +229,7 @@ async def process_receipt_photo(message: Message, state: FSMContext):
     )
     admin_kb = get_admin_order_actions_keyboard(order_code, str(chat_id))
 
-    for admin_id in bot_config.ADMIN_TELEGRAM_IDS:
+    for admin_id in bot_config.get_admins_for_permission("orders_finance"):
         try:
             if receipt_file_id:
                 await message.bot.send_photo(

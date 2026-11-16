@@ -77,6 +77,12 @@ class AdminBroadcastStates(StatesGroup):
     waiting_broadcast_message = State()
 
 
+class AdminManageStates(StatesGroup):
+    """حالات إضافة مشرف جديد وتحديد صلاحياته"""
+    waiting_new_admin_target = State()
+    customizing_new_admin_perms = State()
+
+
 class BundleCartStates(StatesGroup):
     """حالات سلة شراء عدة مذكرات معاً عبر البوت"""
     selecting_items = State()

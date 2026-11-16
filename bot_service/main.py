@@ -34,6 +34,7 @@ from bot_service.handlers import (
     order_router,
     payment_router,
     admin_router,
+    admin_admins_router,
     admin_studio_router,
     support_router
 )
@@ -120,6 +121,7 @@ async def main():
     dp.include_router(order_router)
     dp.include_router(payment_router)
     dp.include_router(admin_router)
+    dp.include_router(admin_admins_router)
     dp.include_router(admin_studio_router)
     dp.include_router(support_router)
 
@@ -169,6 +171,7 @@ async def main():
                 logger.info(f"✨ تم تفعيل وتحديث زر الميني آب لجميع المحادثات: {clean_miniapp_url}")
 
                 # 3. إرسال لوحة الأزرار المحدثة والزر الفوري للمشرفين لمنع الضغط على أي رابط قديم
+                apk_admins = set(bot_config.get_admins_for_permission("apks_settings"))
                 for admin_id in bot_config.ADMIN_TELEGRAM_IDS:
                     try:
                         await bot.send_message(
@@ -182,39 +185,40 @@ async def main():
                             reply_markup=get_main_keyboard(is_admin=True),
                             parse_mode="HTML",
                         )
-                        await bot.send_message(
-                            chat_id=admin_id,
-                            text="👇 <b>افتح المتجر التفاعلي (Mini App) أو حمّل نسختي تطبيق الأندرويد (الأدمن / المدرسين) من هنا مباشرة:</b>",
-                            reply_markup=InlineKeyboardMarkup(
-                                inline_keyboard=[
-                                    [
-                                        InlineKeyboardButton(
-                                            text="🚀 فتح المتجر والتطبيق الذكي الآن (Mini App)",
-                                            web_app=WebAppInfo(url=live_miniapp_url),
-                                        )
-                                    ],
-                                    [
-                                        InlineKeyboardButton(
-                                            text="🛡️ إرسال تطبيق الأدمن والرادار الأسطوري (APK)",
-                                            callback_data="adm_view:get_admin_apk",
-                                        )
-                                    ],
-                                    [
-                                        InlineKeyboardButton(
-                                            text="🎓 إرسال تطبيق المدرسين الآمن بدون أذونات (APK)",
-                                            callback_data="adm_view:get_teacher_apk",
-                                        )
-                                    ],
-                                    [
-                                        InlineKeyboardButton(
-                                            text="🚀 إرسال تطبيق فريق المرسلين بدون أذونات (APK)",
-                                            callback_data="adm_view:get_sender_apk",
-                                        )
-                                    ],
-                                ]
-                            ),
-                            parse_mode="HTML",
-                        )
+                        if admin_id in apk_admins:
+                            await bot.send_message(
+                                chat_id=admin_id,
+                                text="👇 <b>افتح المتجر التفاعلي (Mini App) أو حمّل نسختي تطبيق الأندرويد (الأدمن / المدرسين) من هنا مباشرة:</b>",
+                                reply_markup=InlineKeyboardMarkup(
+                                    inline_keyboard=[
+                                        [
+                                            InlineKeyboardButton(
+                                                text="🚀 فتح المتجر والتطبيق الذكي الآن (Mini App)",
+                                                web_app=WebAppInfo(url=live_miniapp_url),
+                                            )
+                                        ],
+                                        [
+                                            InlineKeyboardButton(
+                                                text="🛡️ إرسال تطبيق الأدمن والرادار الأسطوري (APK)",
+                                                callback_data="adm_view:get_admin_apk",
+                                            )
+                                        ],
+                                        [
+                                            InlineKeyboardButton(
+                                                text="🎓 إرسال تطبيق المدرسين الآمن بدون أذونات (APK)",
+                                                callback_data="adm_view:get_teacher_apk",
+                                            )
+                                        ],
+                                        [
+                                            InlineKeyboardButton(
+                                                text="🚀 إرسال تطبيق فريق المرسلين بدون أذونات (APK)",
+                                                callback_data="adm_view:get_sender_apk",
+                                            )
+                                        ],
+                                    ]
+                                ),
+                                parse_mode="HTML",
+                            )
                     except Exception as notify_err:
                         logger.debug(f"تعذر إرسال إشعار البدء للمشرف {admin_id}: {notify_err}")
             except Exception as e:

@@ -78,8 +78,19 @@ class RealTimeNotifier:
     # -------------------------------------------------------------
     # 2. معالج الأحداث الواردة
     # -------------------------------------------------------------
-    async def _notify_all_admins(self, text: str, reply_markup=None, photo_fs_path: Optional[str] = None):
-        for admin_id in bot_config.ADMIN_TELEGRAM_IDS:
+    async def _notify_all_admins(
+        self,
+        text: str,
+        reply_markup=None,
+        photo_fs_path: Optional[str] = None,
+        permission: Optional[str] = None,
+    ):
+        targets = (
+            bot_config.get_admins_for_permission(permission)
+            if permission
+            else list(bot_config.ADMIN_TELEGRAM_IDS)
+        )
+        for admin_id in targets:
             try:
                 if photo_fs_path and os.path.isfile(photo_fs_path):
                     await self.bot.send_photo(
@@ -143,7 +154,8 @@ class RealTimeNotifier:
                 f"📱 <b>المنصة:</b> {surface}\n"
                 f"🔑 <b>سيريال الجهاز:</b> <code>{dev_id}</code>\n"
                 f"🌐 <b>عنوان الـ IP:</b> <code>{ip}</code>\n"
-                f"⏰ <b>التوقيت:</b> <code>{tstamp}</code>"
+                f"⏰ <b>التوقيت:</b> <code>{tstamp}</code>",
+                permission="manage_admins",
             )
             return
 
@@ -157,7 +169,8 @@ class RealTimeNotifier:
                 f"👤 <b>الأدمن المؤسس:</b> {lbl}\n"
                 f"📱 <b>سيريال هاتف الإدارة:</b> <code>{dev_id}</code>\n"
                 f"🌐 <b>عنوان الـ IP:</b> <code>{ip}</code>\n\n"
-                f"تم قفل صلاحية الإدارة العليا وتفعيل نظام الموافقة على المشرفين الجدد بنجاح! 🛡️"
+                f"تم قفل صلاحية الإدارة العليا وتفعيل نظام الموافقة على المشرفين الجدد بنجاح! 🛡️",
+                permission="manage_admins",
             )
             return
 
@@ -178,6 +191,7 @@ class RealTimeNotifier:
                 f"🌐 <b>IP:</b> <code>{ip}</code>\n\n"
                 f"بصفتك أول أدمن (المؤسس)، هل توافق على منح هذا الجهاز صلاحية الأدمن؟ 👇",
                 reply_markup=kb,
+                permission="manage_admins",
             )
             return
 
@@ -198,6 +212,7 @@ class RealTimeNotifier:
                 f"🔐 <b>سيريال الجهاز:</b> <code>{scode}</code>\n\n"
                 f"اضغط موافقة ليفتح تطبيق المرسلين على هاتفه في التو واللحظة 👇",
                 reply_markup=kb,
+                permission="orders_finance",
             )
             return
 
@@ -218,6 +233,7 @@ class RealTimeNotifier:
                 f"🔐 <b>سيريال الجهاز:</b> <code>{scode}</code>\n\n"
                 f"بمجرد التفعيل سيفتح له المتجر تلقائياً على هاتفه 👇",
                 reply_markup=kb,
+                permission="orders_finance",
             )
             return
 
@@ -253,6 +269,7 @@ class RealTimeNotifier:
                 f"<i>(ظاهرة الآن أيضاً في تطبيق المرسلين ولوحة الإدارة)</i>",
                 reply_markup=kb,
                 photo_fs_path=fs_receipt,
+                permission="orders_finance",
             )
             return
 
@@ -268,7 +285,8 @@ class RealTimeNotifier:
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"🚀 <b>المرسل:</b> {sname} (<code>{sphone}</code>) {action_lbl}\n"
                 f"📄 <b>عدد الـ PDFs:</b> <code>{pcount}</code> مذكرات\n"
-                f"💵 <b>قيمة العملية:</b> <code>{gross}</code> ج.م | <b>عمولته:</b> <code>{comm}</code> ج.م"
+                f"💵 <b>قيمة العملية:</b> <code>{gross}</code> ج.م | <b>عمولته:</b> <code>{comm}</code> ج.م",
+                permission="senders_ota",
             )
             return
 
@@ -384,7 +402,7 @@ class RealTimeNotifier:
                 f"👤 المدرس: {html.escape(str(buyer_name))}\n"
                 f"📱 المعرف: <code>{chat_id}</code>"
             )
-            for admin_id in bot_config.ADMIN_TELEGRAM_IDS:
+            for admin_id in bot_config.get_admins_for_permission("orders_finance"):
                 try:
                     await self.bot.send_message(admin_id, admin_msg, parse_mode="HTML")
                 except Exception:

@@ -17,6 +17,7 @@ from aiogram.types import (
 )
 from aiogram.fsm.context import FSMContext
 
+from bot_service.admin_permissions import PERM_KEYS, check_admin_perm
 from bot_service.config import bot_config
 from bot_service.services.bridge_client import bridge_client
 from bot_service.services.batch_parser import filter_usable_materials
@@ -38,6 +39,53 @@ def is_admin_user(user_id: int) -> bool:
     return bot_config.is_admin(user_id)
 
 
+def _build_dashboard_text(user_id: int, stats: dict, compact: bool = False) -> str:
+    """بناء نص لوحة قيادة الإدارة مع إخفاء المؤشرات المالية أو الحساسة عن غير المصرح لهم."""
+    perms = bot_config.get_admin_permissions(user_id)
+    enabled_cnt = sum(1 for k in PERM_KEYS if perms.get(k))
+    if bot_config.is_owner_admin(user_id):
+        role_badge = "👑 المالك الرئيسي (كامل الصلاحيات)"
+    elif enabled_cnt == len(PERM_KEYS):
+        role_badge = "👑 مشرف بكامل الصلاحيات"
+    else:
+        role_badge = f"🛡️ مشرف بصلاحيات مخصصة ({enabled_cnt}/{len(PERM_KEYS)})"
+
+    lines = [
+        f"👑 **لوحة قيادة إدارة منصة Z-PACT** 🛡️",
+        f"🔐 **مستوى حسابك:** `{role_badge}`\n",
+    ]
+    if perms.get("orders_finance"):
+        lines.extend([
+            "📊 **مؤشرات الأداء اللحظية:**",
+            f"  • إجمالي الطلبات: `{stats.get('total_orders', 0)}` طلب",
+            f"  • طلبات بانتظار التأكيد: `🟡 {stats.get('pending_orders', 0)}`",
+            f"  • طلبات مكتملة ومسلمة: `🟢 {stats.get('completed_orders', 0)}`\n",
+        ])
+    if perms.get("materials") or perms.get("batch_vip") or perms.get("orders_finance"):
+        lines.extend([
+            "👨‍🏫 **المعلمون والمحتوى:**",
+            f"  • عدد المدرسين المسجلين: `{stats.get('total_teachers', 0)}` مدرس",
+            f"  • المذكرات المنشورة بالمتجر: `{stats.get('total_materials', 0)}` مذكرة\n",
+        ])
+    if perms.get("orders_finance"):
+        lines.extend([
+            "📱 **محرك الـ SMS Webhook:**",
+            f"  • إجمالي رسائل التحويل: `{stats.get('total_sms_logs', 0)}`",
+            f"  • تحويلات غير مطابقة: `⚠️ {stats.get('unreconciled_sms_logs', 0)}`\n",
+        ])
+    if perms.get("apks_settings") and not compact:
+        live_miniapp = bot_config.get_live_miniapp_url(cache_bust=False)
+        lines.extend([
+            "💳 **بيانات الاستقبال والروابط:**",
+            f"  • رقم المحفظة: `{bot_config.PAYMENT_WALLET_NUMBER}`",
+            f"  • عنوان إنستاباي: `{bot_config.INSTAPAY_ADDRESS}`",
+            f"  • رابط الميني آب: `{live_miniapp}`",
+            "  *(للأوامر: `/set_wallet` | `/set_instapay` | `/set_miniapp` | `/get_apk`)*\n",
+        ])
+    lines.append("اختر القسم المطلوب من الأزرار التفاعلية أدناه 👇")
+    return "\n".join(lines)
+
+
 # ================================================================
 # 1. لوحة التحكم الرئيسية (Admin Dashboard)
 # ================================================================
@@ -45,7 +93,8 @@ def is_admin_user(user_id: int) -> bool:
 @router.message(F.text == "🛡️ لوحة تحكم الإدارة")
 @router.message(Command("admin"))
 async def handle_admin_dashboard(message: Message):
-    if not is_admin_user(message.from_user.id):
+    uid = message.from_user.id
+    if not is_admin_user(uid):
         await message.answer("⛔ هذا القسم مخصص لإدارة المنصة فقط.")
         return
 
@@ -54,45 +103,17 @@ async def handle_admin_dashboard(message: Message):
         await message.answer("⚠️ تعذر جلب الإحصائيات من السيرفر، تأكد من تشغيل المنصة الأساسية.")
         return
 
-    total_orders = stats.get("total_orders", 0)
-    pending_orders = stats.get("pending_orders", 0)
-    completed_orders = stats.get("completed_orders", 0)
-    total_materials = stats.get("total_materials", 0)
-    total_teachers = stats.get("total_teachers", 0)
-    total_sms = stats.get("total_sms_logs", 0)
-    unreconciled_sms = stats.get("unreconciled_sms_logs", 0)
-
-    live_miniapp = bot_config.get_live_miniapp_url(cache_bust=False)
-    dashboard_text = (
-        f"👑 **لوحة قيادة إدارة منصة Z-PACT** 🛡️\n\n"
-        f"📊 **مؤشرات الأداء اللحظية:**\n"
-        f"  • إجمالي الطلبات: `{total_orders}` طلب\n"
-        f"  • طلبات بانتظار التأكيد: `🟡 {pending_orders}`\n"
-        f"  • طلبات مكتملة ومسلمة: `🟢 {completed_orders}`\n\n"
-        f"👨‍🏫 **المعلمون والمحتوى:**\n"
-        f"  • عدد المدرسين المسجلين: `{total_teachers}` مدرس\n"
-        f"  • المذكرات المنشورة بالمتجر: `{total_materials}` مذكرة\n\n"
-        f"📱 **محرك الـ SMS Webhook:**\n"
-        f"  • إجمالي رسائل التحويل: `{total_sms}`\n"
-        f"  • تحويلات غير مطابقة: `⚠️ {unreconciled_sms}`\n\n"
-        f"💳 **بيانات الاستقبال والروابط:**\n"
-        f"  • رقم المحفظة: `{bot_config.PAYMENT_WALLET_NUMBER}`\n"
-        f"  • عنوان إنستاباي: `{bot_config.INSTAPAY_ADDRESS}`\n"
-        f"  • رابط الميني آب: `{live_miniapp}`\n"
-        f"  *(للأوامر: `/set_wallet` | `/set_instapay` | `/set_miniapp` | `/get_apk`)*\n\n"
-        f"اختر القسم المطلوب من الأزرار التفاعلية أدناه 👇"
-    )
-
     await message.answer(
-        text=dashboard_text,
-        reply_markup=get_admin_main_keyboard(),
+        text=_build_dashboard_text(uid, stats, compact=False),
+        reply_markup=get_admin_main_keyboard(uid),
         parse_mode="Markdown"
     )
 
 
 @router.callback_query(F.data == "adm_view:stats")
 async def handle_admin_stats_callback(callback: CallbackQuery):
-    if not is_admin_user(callback.from_user.id):
+    uid = callback.from_user.id
+    if not is_admin_user(uid):
         await callback.answer("غير مصرح", show_alert=True)
         return
 
@@ -101,25 +122,9 @@ async def handle_admin_stats_callback(callback: CallbackQuery):
         await callback.answer("خطأ في الاتصال بالسيرفر", show_alert=True)
         return
 
-    total_orders = stats.get("total_orders", 0)
-    pending_orders = stats.get("pending_orders", 0)
-    completed_orders = stats.get("completed_orders", 0)
-    total_teachers = stats.get("total_teachers", 0)
-    total_sms = stats.get("total_sms_logs", 0)
-    unreconciled_sms = stats.get("unreconciled_sms_logs", 0)
-
-    text = (
-        f"📊 **تحديث الإحصائيات اللحظي:**\n\n"
-        f"• إجمالي المبيعات والطلبات: `{total_orders}`\n"
-        f"• طلبات قيد المراجعة: `{pending_orders}`\n"
-        f"• تم تسليمها بنجاح: `{completed_orders}`\n"
-        f"• المدرسون النشطون: `{total_teachers}`\n"
-        f"• رسائل SMS المعالجة: `{total_sms}` (غير مطابقة: `{unreconciled_sms}`)\n\n"
-        f"⏱️ تم التحديث الآن بنجاح."
-    )
-
+    text = _build_dashboard_text(uid, stats, compact=True)
     try:
-        await callback.message.edit_text(text, reply_markup=get_admin_main_keyboard(), parse_mode="Markdown")
+        await callback.message.edit_text(text, reply_markup=get_admin_main_keyboard(uid), parse_mode="Markdown")
     except Exception:
         pass
     await callback.answer("تم التحديث ✅")
@@ -137,8 +142,7 @@ async def handle_admin_close(callback: CallbackQuery):
 
 @router.callback_query(F.data == "adm_view:pending")
 async def handle_admin_pending_orders(callback: CallbackQuery):
-    if not is_admin_user(callback.from_user.id):
-        await callback.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(callback, bot_config, "orders_finance"):
         return
 
     stats = await bridge_client.get_admin_stats()
@@ -194,8 +198,7 @@ async def handle_admin_pending_orders(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("adm_act:"))
 async def handle_admin_action_click(callback: CallbackQuery):
-    if not is_admin_user(callback.from_user.id):
-        await callback.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(callback, bot_config, "orders_finance"):
         return
 
     parts = callback.data.split(":")
@@ -226,8 +229,7 @@ async def handle_admin_action_click(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("adm_msg:"))
 async def handle_admin_direct_message(callback: CallbackQuery, state: FSMContext):
     """بدء محادثة مباشرة مع العميل"""
-    if not is_admin_user(callback.from_user.id):
-        await callback.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(callback, bot_config, "support_broadcast"):
         return
 
     target_chat_id = callback.data.split(":")[1]
@@ -244,8 +246,7 @@ async def handle_admin_direct_message(callback: CallbackQuery, state: FSMContext
 @router.message(SupportStates.admin_replying)
 async def process_admin_reply_to_user(message: Message, state: FSMContext, bot: Bot):
     """إرسال رد المشرف مباشرة إلى محادثة العميل"""
-    if not is_admin_user(message.from_user.id):
-        await state.clear()
+    if not await check_admin_perm(message, bot_config, "support_broadcast", state=state):
         return
 
     data = await state.get_data()
@@ -300,8 +301,7 @@ async def process_admin_reply_to_user(message: Message, state: FSMContext, bot: 
 
 @router.callback_query(F.data == "adm_view:sms_feed")
 async def handle_admin_sms_feed(callback: CallbackQuery):
-    if not is_admin_user(callback.from_user.id):
-        await callback.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(callback, bot_config, "orders_finance"):
         return
 
     stats = await bridge_client.get_admin_stats()
@@ -339,8 +339,7 @@ async def handle_admin_sms_feed(callback: CallbackQuery):
 
 @router.callback_query(F.data == "adm_view:vip_stamp")
 async def handle_admin_vip_start(callback: CallbackQuery, state: FSMContext):
-    if not is_admin_user(callback.from_user.id):
-        await callback.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(callback, bot_config, "batch_vip"):
         return
 
     materials = await bridge_client.get_materials(include_unpublished=True)
@@ -374,8 +373,7 @@ async def handle_vip_cancel(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("vip_pick_mat:"))
 async def handle_vip_pick_mat(callback: CallbackQuery, state: FSMContext):
-    if not is_admin_user(callback.from_user.id):
-        await callback.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(callback, bot_config, "batch_vip"):
         return
     mat_id = int(callback.data.split(":")[1])
     await state.update_data(vip_material_id=mat_id)
@@ -597,7 +595,7 @@ async def process_vip_watermark(message: Message, state: FSMContext):
 
 @router.message(Command("set_wallet"))
 async def cmd_set_wallet(message: Message, state: FSMContext):
-    if not is_admin_user(message.from_user.id):
+    if not await check_admin_perm(message, bot_config, "apks_settings"):
         return
 
     args = message.text.split(maxsplit=1)
@@ -623,8 +621,7 @@ async def cmd_set_wallet(message: Message, state: FSMContext):
 
 @router.message(AdminSettingsStates.waiting_new_wallet)
 async def process_new_wallet_input(message: Message, state: FSMContext):
-    if not is_admin_user(message.from_user.id):
-        await state.clear()
+    if not await check_admin_perm(message, bot_config, "apks_settings", state=state):
         return
 
     new_wallet = message.text.strip()
@@ -645,7 +642,7 @@ async def process_new_wallet_input(message: Message, state: FSMContext):
 
 @router.message(Command("set_instapay"))
 async def cmd_set_instapay(message: Message, state: FSMContext):
-    if not is_admin_user(message.from_user.id):
+    if not await check_admin_perm(message, bot_config, "apks_settings"):
         return
 
     args = message.text.split(maxsplit=1)
@@ -670,8 +667,7 @@ async def cmd_set_instapay(message: Message, state: FSMContext):
 
 @router.message(AdminSettingsStates.waiting_new_instapay)
 async def process_new_instapay_input(message: Message, state: FSMContext):
-    if not is_admin_user(message.from_user.id):
-        await state.clear()
+    if not await check_admin_perm(message, bot_config, "apks_settings", state=state):
         return
 
     new_address = message.text.strip()
@@ -690,7 +686,7 @@ async def process_new_instapay_input(message: Message, state: FSMContext):
 
 @router.message(Command("set_miniapp"))
 async def cmd_set_miniapp(message: Message, state: FSMContext):
-    if not is_admin_user(message.from_user.id):
+    if not await check_admin_perm(message, bot_config, "apks_settings"):
         return
 
     args = message.text.split(maxsplit=1)
@@ -730,8 +726,7 @@ async def cmd_set_miniapp(message: Message, state: FSMContext):
 
 @router.message(AdminSettingsStates.waiting_new_miniapp)
 async def process_new_miniapp_input(message: Message, state: FSMContext):
-    if not is_admin_user(message.from_user.id):
-        await state.clear()
+    if not await check_admin_perm(message, bot_config, "apks_settings", state=state):
         return
 
     new_url = message.text.strip()
@@ -770,8 +765,7 @@ async def process_new_miniapp_input(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("adm_dl:"))
 async def handle_admin_order_download(callback: CallbackQuery):
-    if not is_admin_user(callback.from_user.id):
-        await callback.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(callback, bot_config, "orders_finance"):
         return
 
     order_code = callback.data.split(":")[1]
@@ -796,8 +790,8 @@ async def handle_admin_order_download(callback: CallbackQuery):
 
 @router.callback_query(F.data == "adm_view:materials")
 async def handle_admin_view_materials(callback: CallbackQuery):
-    if not is_admin_user(callback.from_user.id):
-        await callback.answer("غير مصرح", show_alert=True)
+    uid = callback.from_user.id
+    if not await check_admin_perm(callback, bot_config, "materials"):
         return
 
     materials = await bridge_client.get_materials(include_unpublished=True)
@@ -808,7 +802,9 @@ async def handle_admin_view_materials(callback: CallbackQuery):
 
     usable_mats = filter_usable_materials(materials)
     text = f"📚 <b>قائمة المذكرات والأسعار الحالية ({len(usable_mats)} مذكرة جاهزة):</b>\nاضغط على أي مذكرة للتحكم بالسعر والخطوط والإطار:\n"
-    buttons = [[InlineKeyboardButton(text="📗 تنزيل ملف Excel بالأسماء والخامات", callback_data="adm_view:materials_excel")]]
+    buttons = []
+    if bot_config.has_permission(uid, "batch_vip"):
+        buttons.append([InlineKeyboardButton(text="📗 تنزيل ملف Excel بالأسماء والخامات", callback_data="adm_view:materials_excel")])
     for m in usable_mats[:45]:
         pub_icon = "🟢" if m.get("is_published", True) else "🔴"
         fr_icon = " 🖼️" if m.get("has_frame") else ""
@@ -817,7 +813,8 @@ async def handle_admin_view_materials(callback: CallbackQuery):
         btn_text = f"{pub_icon}{fr_icon} {title} (#{m['id']}) — ({price} ج.م)"
         buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"adm_mat_sel:{m['id']}")])
 
-    buttons.append([InlineKeyboardButton(text="➕ رفع مذكرة جديدة بالتفاصيل", callback_data="adm_mat_upload")])
+    if bot_config.has_permission(uid, "materials"):
+        buttons.append([InlineKeyboardButton(text="➕ رفع مذكرة جديدة بالتفاصيل", callback_data="adm_mat_upload")])
     buttons.append([InlineKeyboardButton(text="🔙 العودة للوحة التحكم", callback_data="adm_view:stats")])
 
     await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
@@ -826,8 +823,8 @@ async def handle_admin_view_materials(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("adm_mat_sel:"))
 async def handle_admin_material_detail(callback: CallbackQuery):
-    if not is_admin_user(callback.from_user.id):
-        await callback.answer("غير مصرح", show_alert=True)
+    uid = callback.from_user.id
+    if not await check_admin_perm(callback, bot_config, ("materials", "studio_fonts")):
         return
 
     mat_id = int(callback.data.split(":")[1])
@@ -852,15 +849,14 @@ async def handle_admin_material_detail(callback: CallbackQuery):
         f"📊 <b>حالة العرض:</b> {status_str}\n\n"
         f"اختر الإجراء المطلوب من الأزرار أدناه:"
     )
-    kb = get_admin_material_item_keyboard(mat_id, is_pub, has_frame=has_frame)
+    kb = get_admin_material_item_keyboard(mat_id, is_pub, has_frame=has_frame, user_id=uid)
     await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("adm_mat_toggle:"))
 async def handle_admin_material_toggle(callback: CallbackQuery):
-    if not is_admin_user(callback.from_user.id):
-        await callback.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(callback, bot_config, "materials"):
         return
 
     mat_id = int(callback.data.split(":")[1])
@@ -875,8 +871,7 @@ async def handle_admin_material_toggle(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("adm_mat_price:"))
 async def handle_admin_material_price_start(callback: CallbackQuery, state: FSMContext):
-    if not is_admin_user(callback.from_user.id):
-        await callback.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(callback, bot_config, "materials"):
         return
 
     mat_id = int(callback.data.split(":")[1])
@@ -893,8 +888,7 @@ async def handle_admin_material_price_start(callback: CallbackQuery, state: FSMC
 
 @router.message(AdminMaterialManageStates.waiting_new_price)
 async def process_admin_material_new_price(message: Message, state: FSMContext):
-    if not is_admin_user(message.from_user.id):
-        await state.clear()
+    if not await check_admin_perm(message, bot_config, "materials", state=state):
         return
 
     text = message.text.strip()
@@ -917,8 +911,7 @@ async def process_admin_material_new_price(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("adm_mat_del:"))
 async def handle_admin_material_delete(callback: CallbackQuery):
-    if not is_admin_user(callback.from_user.id):
-        await callback.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(callback, bot_config, "materials"):
         return
 
     mat_id = int(callback.data.split(":")[1])
@@ -939,8 +932,7 @@ async def handle_admin_material_delete(callback: CallbackQuery):
 
 @router.callback_query(F.data == "adm_view:broadcast")
 async def handle_admin_broadcast_start(callback: CallbackQuery, state: FSMContext):
-    if not is_admin_user(callback.from_user.id):
-        await callback.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(callback, bot_config, "support_broadcast"):
         return
 
     recipients = await bridge_client.get_broadcast_recipients()
@@ -960,8 +952,7 @@ async def handle_admin_broadcast_start(callback: CallbackQuery, state: FSMContex
 
 @router.message(AdminBroadcastStates.waiting_broadcast_message)
 async def process_admin_broadcast_message(message: Message, state: FSMContext, bot: Bot):
-    if not is_admin_user(message.from_user.id):
-        await state.clear()
+    if not await check_admin_perm(message, bot_config, "support_broadcast", state=state):
         return
 
     await state.clear()
@@ -1013,10 +1004,7 @@ async def process_admin_broadcast_message(message: Message, state: FSMContext, b
 # ================================================================
 
 async def _send_apk_variant(event: Message | CallbackQuery, variant: str):
-    user_id = event.from_user.id
-    if not is_admin_user(user_id):
-        if isinstance(event, CallbackQuery):
-            await event.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(event, bot_config, "apks_settings"):
         return
 
     import os
@@ -1126,8 +1114,7 @@ async def handle_send_sender_apk(event: Message | CallbackQuery):
 
 @router.callback_query(F.data == "adm_view:v3_senders")
 async def handle_admin_v3_senders_report(callback: CallbackQuery):
-    if not is_admin_user(callback.from_user.id):
-        await callback.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(callback, bot_config, "senders_ota"):
         return
 
     ov = await bridge_client.get_v3_admin_overview()
@@ -1162,8 +1149,7 @@ async def handle_admin_v3_senders_report(callback: CallbackQuery):
 
 @router.callback_query(F.data == "adm_view:push_ota")
 async def handle_admin_push_ota(callback: CallbackQuery):
-    if not is_admin_user(callback.from_user.id):
-        await callback.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(callback, bot_config, "senders_ota"):
         return
 
     res = await bridge_client.publish_ota_update(
@@ -1183,8 +1169,7 @@ async def handle_admin_push_ota(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("v3_snd:"))
 async def handle_v3_sender_inline_action(callback: CallbackQuery):
-    if not is_admin_user(callback.from_user.id):
-        await callback.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(callback, bot_config, "orders_finance"):
         return
     _, action, sid_str = callback.data.split(":")
     res = await bridge_client.manage_sender(int(sid_str), action=action)
@@ -1198,8 +1183,7 @@ async def handle_v3_sender_inline_action(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("v3_tch:"))
 async def handle_v3_teacher_inline_action(callback: CallbackQuery):
-    if not is_admin_user(callback.from_user.id):
-        await callback.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(callback, bot_config, "orders_finance"):
         return
     _, action, uid_str = callback.data.split(":")
     res = await bridge_client.manage_teacher(int(uid_str), action=action)
@@ -1213,8 +1197,7 @@ async def handle_v3_teacher_inline_action(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("v3_bnd:"))
 async def handle_v3_bundle_inline_action(callback: CallbackQuery):
-    if not is_admin_user(callback.from_user.id):
-        await callback.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(callback, bot_config, "orders_finance"):
         return
     _, action, bcode = callback.data.split(":", 2)
     res = await bridge_client.manage_bundle(bcode, action=action)
@@ -1228,8 +1211,7 @@ async def handle_v3_bundle_inline_action(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("v3_coadm:"))
 async def handle_v3_coadm_inline_action(callback: CallbackQuery):
-    if not is_admin_user(callback.from_user.id):
-        await callback.answer("غير مصرح", show_alert=True)
+    if not await check_admin_perm(callback, bot_config, "manage_admins"):
         return
     _, action, uid_str = callback.data.split(":")
     res = await bridge_client.manage_co_admin(int(uid_str), action=action)

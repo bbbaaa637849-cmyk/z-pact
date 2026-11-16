@@ -1978,5 +1978,290 @@ class TestIsolatedMobileStudioBridgeAPI(unittest.TestCase):
         self.assertEqual(fallback_sent, ["خطأ تجريبي"])
 
 
+class TestAdminManagementAndPermissions(unittest.TestCase):
+    """اختبارات إضافة المشرفين المساعدين وتحديد صلاحياتهم وعزل القوائم والتنفيذ."""
+
+    def setUp(self):
+        from bot_service.config import bot_config
+
+        try:
+            self._tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        except TypeError:
+            self._tmp_dir = tempfile.TemporaryDirectory()
+
+        self._orig_admins_json = bot_config.ADMINS_JSON_PATH
+        self._orig_admin_ids = set(bot_config.ADMIN_TELEGRAM_IDS)
+        self._orig_registry_cache = getattr(bot_config, "_admin_registry_cache", None)
+        self._orig_stamp_ids = set(stamp_settings.ADMIN_TELEGRAM_IDS)
+        self._orig_reg_ids = set(stamp_settings._REGISTERED_ADMIN_IDS)
+        self._orig_persist_env = bot_config._persist_env
+
+        bot_config.ADMINS_JSON_PATH = os.path.join(self._tmp_dir.name, "bot_admins.json")
+        bot_config._admin_registry_cache = None
+        bot_config.ADMIN_TELEGRAM_IDS = {8287744705}
+        bot_config._persist_env = lambda *a, **kw: None
+
+    def tearDown(self):
+        from bot_service.config import bot_config
+
+        bot_config._persist_env = self._orig_persist_env
+        bot_config.ADMINS_JSON_PATH = self._orig_admins_json
+        bot_config._admin_registry_cache = self._orig_registry_cache
+        bot_config.ADMIN_TELEGRAM_IDS = self._orig_admin_ids
+        stamp_settings._REGISTERED_ADMIN_IDS.clear()
+        stamp_settings._REGISTERED_ADMIN_IDS.update(self._orig_reg_ids)
+        stamp_settings.ADMIN_TELEGRAM_IDS.clear()
+        stamp_settings.ADMIN_TELEGRAM_IDS.update(self._orig_stamp_ids)
+        self._tmp_dir.cleanup()
+
+    def test_01_admin_registry_persistence_owner_protection_and_presets(self):
+        from bot_service.admin_permissions import (
+            AdminRegistry,
+            PERM_KEYS,
+            full_permissions_dict,
+            preset_permissions_dict,
+        )
+        from bot_service.config import bot_config
+
+        self.assertTrue(bot_config.is_owner_admin(8287744705))
+        self.assertFalse(bot_config.remove_admin(8287744705))
+        self.assertTrue(all(bot_config.has_permission(8287744705, k) for k in PERM_KEYS))
+
+        # 1. إضافة مشرف بكامل الصلاحيات (زي تحكمات المالك بالضبط)
+        full_rec = bot_config.set_admin_with_permissions(
+            900111222,
+            full_permissions_dict(),
+            label="مشرف كامل",
+            added_by=8287744705,
+        )
+        self.assertEqual(full_rec["label"], "مشرف كامل")
+        self.assertTrue(bot_config.is_admin(900111222))
+        self.assertTrue(all(bot_config.has_permission(900111222, k) for k in PERM_KEYS))
+        self.assertTrue(stamp_settings.is_admin_telegram_id(900111222))
+
+        # 2. إضافة مشرف بصلاحيات مخفضة (عمليات يومية فقط)
+        ops_rec = bot_config.set_admin_with_permissions(
+            900333444,
+            preset_permissions_dict("operations"),
+            label="مساعد عمليات",
+            added_by=8287744705,
+        )
+        self.assertTrue(ops_rec["permissions"]["batch_vip"])
+        self.assertTrue(ops_rec["permissions"]["orders_finance"])
+        self.assertFalse(ops_rec["permissions"]["apks_settings"])
+        self.assertFalse(ops_rec["permissions"]["manage_admins"])
+        self.assertFalse(bot_config.has_permission(900333444, "apks_settings"))
+        self.assertFalse(bot_config.has_permission(900333444, "manage_admins"))
+
+        # التحقق من التحميل الدائم من القرص عند إعادة التشغيل
+        reloaded = AdminRegistry(bot_config.ADMINS_JSON_PATH)
+        r_ops = reloaded.get_record(900333444)
+        self.assertIsNotNone(r_ops)
+        self.assertEqual(r_ops["label"], "مساعد عمليات")
+        self.assertFalse(r_ops["permissions"]["materials"])
+        self.assertTrue(r_ops["permissions"]["studio_fonts"])
+
+        # توجيه الإشعارات حسب الصلاحية فقط
+        apk_admins = bot_config.get_admins_for_permission("apks_settings")
+        self.assertIn(8287744705, apk_admins)
+        self.assertIn(900111222, apk_admins)
+        self.assertNotIn(900333444, apk_admins)
+
+        # سحب الصلاحيات والإزالة الفورية
+        self.assertTrue(bot_config.remove_admin(900333444))
+        self.assertFalse(bot_config.is_admin(900333444))
+        self.assertFalse(bot_config.has_permission(900333444, "batch_vip"))
+        self.assertNotIn(900333444, bot_config.ADMIN_TELEGRAM_IDS)
+        self.assertFalse(stamp_settings.is_admin_telegram_id(900333444))
+
+    def test_02_dynamic_keyboard_and_dashboard_filtering(self):
+        from bot_service.admin_permissions import preset_permissions_dict
+        from bot_service.config import bot_config
+        from bot_service.handlers.admin import _build_dashboard_text
+        from bot_service.keyboards.inline import (
+            get_admin_main_keyboard,
+            get_admin_material_item_keyboard,
+        )
+
+        bot_config.set_admin_with_permissions(
+            900333444,
+            preset_permissions_dict("operations"),
+            label="مشرف مخفض",
+        )
+
+        def _callbacks(markup):
+            return {
+                btn.callback_data
+                for row in markup.inline_keyboard
+                for btn in row
+                if btn.callback_data
+            }
+
+        owner_cbs = _callbacks(get_admin_main_keyboard(8287744705))
+        self.assertIn("adm_view:admins", owner_cbs)
+        self.assertIn("adm_view:get_admin_apk", owner_cbs)
+        self.assertIn("adm_view:batch_help", owner_cbs)
+        self.assertIn("adm_view:materials", owner_cbs)
+
+        ops_cbs = _callbacks(get_admin_main_keyboard(900333444))
+        self.assertIn("adm_view:batch_help", ops_cbs)
+        self.assertIn("adm_view:pending", ops_cbs)
+        self.assertIn("adm_view:font_settings", ops_cbs)
+        self.assertNotIn("adm_view:admins", ops_cbs)
+        self.assertNotIn("adm_view:get_admin_apk", ops_cbs)
+        self.assertNotIn("adm_view:materials", ops_cbs)
+        self.assertNotIn("adm_mat_upload", ops_cbs)
+
+        # لوحة المذكرة المفردة: مشرف العمليات (studio_fonts=True, materials=False) يرى الخطوط والإطارات فقط
+        mat_cbs = _callbacks(get_admin_material_item_keyboard(10, True, has_frame=True, user_id=900333444))
+        self.assertIn("adm_mat_font:10", mat_cbs)
+        self.assertIn("adm_mat_frame:10", mat_cbs)
+        self.assertNotIn("adm_mat_del:10", mat_cbs)
+        self.assertNotIn("adm_mat_price:10", mat_cbs)
+
+        # ومشرف المذكرات فقط (materials=True, studio_fonts=False) يرى السعر والنشر والاستبدال دون الخطوط والإطارات
+        mats_only_perms = preset_permissions_dict("empty")
+        mats_only_perms["materials"] = True
+        bot_config.set_admin_with_permissions(900444555, mats_only_perms, label="مذكرات فقط")
+        mats_only_cbs = _callbacks(get_admin_material_item_keyboard(10, True, has_frame=True, user_id=900444555))
+        self.assertIn("adm_mat_price:10", mats_only_cbs)
+        self.assertIn("adm_mat_replace_pdf:10", mats_only_cbs)
+        self.assertNotIn("adm_mat_font:10", mats_only_cbs)
+        self.assertNotIn("adm_mat_frame:10", mats_only_cbs)
+
+        # نص لوحة التحكم يخفي أرقام المحافظ وروابط الإعداد الحساسة عن المشرف المقيد
+        sample_stats = {
+            "total_orders": 12,
+            "pending_orders": 2,
+            "completed_orders": 10,
+            "total_teachers": 5,
+            "total_materials": 8,
+            "total_sms_logs": 4,
+            "unreconciled_sms_logs": 1,
+        }
+        owner_txt = _build_dashboard_text(8287744705, sample_stats)
+        self.assertIn(bot_config.PAYMENT_WALLET_NUMBER, owner_txt)
+        ops_txt = _build_dashboard_text(900333444, sample_stats)
+        self.assertNotIn(bot_config.PAYMENT_WALLET_NUMBER, ops_txt)
+        self.assertIn("صلاحيات مخصصة (4/8)", ops_txt)
+
+    def test_03_interactive_admin_flow_and_runtime_enforcement(self):
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+        import bot_service.handlers.admin as admin_mod
+        import bot_service.handlers.admin_admins as adm_mgmt
+        from bot_service.config import bot_config
+
+        class _FakeState:
+            def __init__(self):
+                self._state = None
+                self._data = {}
+
+            async def set_state(self, st):
+                self._state = st
+
+            async def update_data(self, **kw):
+                self._data.update(kw)
+
+            async def get_data(self):
+                return dict(self._data)
+
+            async def clear(self):
+                self._state = None
+                self._data.clear()
+
+        async def _run():
+            fake_state = _FakeState()
+            sent_messages = []
+
+            async def _msg_answer(text, **kwargs):
+                sent_messages.append(("answer", text, kwargs.get("reply_markup")))
+                return SimpleNamespace(edit_text=AsyncMock())
+
+            class _FakeBot:
+                async def send_message(self, chat_id, text, **kwargs):
+                    sent_messages.append(("dm", chat_id, text))
+
+            fake_bot = _FakeBot()
+
+            # 1. اختبار استخراج الآيدي من رسالة محولة (Forward)
+            fwd_msg = SimpleNamespace(
+                forward_origin=SimpleNamespace(
+                    sender_user=SimpleNamespace(id=777888999, full_name="عمر المشرف")
+                ),
+                forward_from=None,
+                contact=None,
+                text=None,
+            )
+            uid_fwd, lbl_fwd, err_fwd = adm_mgmt._extract_target_from_message(fwd_msg)
+            self.assertIsNone(err_fwd)
+            self.assertEqual(uid_fwd, 777888999)
+            self.assertEqual(lbl_fwd, "عمر المشرف")
+
+            # 2. المالك يرسل نص "900555666 أ/ محمود" ثم يطفئ صلاحيتين ويحفظ
+            add_input_msg = SimpleNamespace(
+                from_user=SimpleNamespace(id=8287744705),
+                text="900555666 أ/ محمود",
+                forward_origin=None,
+                forward_from=None,
+                contact=None,
+                answer=_msg_answer,
+            )
+            await adm_mgmt.handle_add_admin_target_input(add_input_msg, fake_state)
+            self.assertEqual(fake_state._data["new_admin_id"], 900555666)
+            self.assertEqual(fake_state._data["new_admin_label"], "أ/ محمود")
+
+            cb_answers = []
+
+            def _make_cb(uid, data_str):
+                async def _cb_ans(text=None, show_alert=False):
+                    cb_answers.append((text, show_alert))
+
+                return SimpleNamespace(
+                    from_user=SimpleNamespace(id=uid),
+                    data=data_str,
+                    bot=fake_bot,
+                    answer=_cb_ans,
+                    message=SimpleNamespace(
+                        edit_text=AsyncMock(),
+                        answer=AsyncMock(),
+                        reply=AsyncMock(),
+                    ),
+                )
+
+            await adm_mgmt.handle_new_admin_perm_action(_make_cb(8287744705, "adm_adm_new:tog:apks_settings"), fake_state)
+            await adm_mgmt.handle_new_admin_perm_action(_make_cb(8287744705, "adm_adm_new:tog:manage_admins"), fake_state)
+            await adm_mgmt.handle_new_admin_perm_action(_make_cb(8287744705, "adm_adm_new:save"), fake_state)
+
+            self.assertTrue(bot_config.is_admin(900555666))
+            self.assertTrue(bot_config.has_permission(900555666, "batch_vip"))
+            self.assertFalse(bot_config.has_permission(900555666, "apks_settings"))
+            self.assertFalse(bot_config.has_permission(900555666, "manage_admins"))
+
+            # 3. منع المشرف المقيد من إدارة المشرفين ومن تحميل الـ APK، بينما يُسمح له بالـ VIP/Batch
+            cb_answers.clear()
+            await adm_mgmt.handle_admins_list(_make_cb(900555666, "adm_view:admins"), _FakeState())
+            self.assertTrue(cb_answers[-1][1])
+            self.assertIn("صلاحية", cb_answers[-1][0])
+
+            cb_answers.clear()
+            await admin_mod._send_apk_variant(_make_cb(900555666, "adm_view:get_admin_apk"), "admin")
+            self.assertTrue(cb_answers[-1][1])
+            self.assertIn("صلاحية", cb_answers[-1][0])
+
+            with patch.object(admin_mod.bridge_client, "get_materials", AsyncMock(return_value=[])):
+                cb_answers.clear()
+                vip_cb = _make_cb(900555666, "adm_view:vip_stamp")
+                await admin_mod.handle_admin_vip_start(vip_cb, _FakeState())
+                vip_cb.message.answer.assert_awaited()
+
+            # 4. المالك يحذف المشرف فتُسحب صلاحياته فوراً
+            await adm_mgmt.handle_remove_admin_execute(_make_cb(8287744705, "adm_adm:del_yes:900555666"))
+            self.assertFalse(bot_config.is_admin(900555666))
+
+        asyncio.run(_run())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
