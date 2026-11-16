@@ -103,26 +103,26 @@ async def handle_material_detail(callback: CallbackQuery):
         await callback.answer("المذكرة غير متوفرة أو تم تعديلها", show_alert=True)
         return
 
-    title = mat.get("title")
-    tag = mat.get("tag") or "عام"
-    price = mat.get("price")
-    pages = mat.get("total_pages")
-    desc = mat.get("description") or "مذكرة دراسية متميزة تحتوي على شرح وتدريبات نموذجية."
+    title = html.escape(str(mat.get("title") or ""))
+    tag = html.escape(str(mat.get("tag") or "عام"))
+    price = html.escape(str(mat.get("price") or 0))
+    pages = html.escape(str(mat.get("total_pages") or 0))
+    desc = html.escape(str(mat.get("description") or "مذكرة دراسية متميزة تحتوي على شرح وتدريبات نموذجية."))
 
     detail_text = (
-        f"📖 **{title}**\n\n"
-        f"🔬 **المادة / القسم:** {tag}\n"
-        f"📄 **عدد الصفحات:** {pages} صفحة (جودة متجهة Vector فائقة الوضوح)\n"
-        f"💵 **السعر المطلوب:** `{price}` ج.م فقط\n"
-        f"🛡️ **مستوى الأمان:** حماية ضد التسريب + علامات مائية مشفرة\n\n"
-        f"📝 **الوصف والملخص:**\n{desc}\n\n"
+        f"📖 <b>{title}</b>\n\n"
+        f"🔬 <b>المادة / القسم:</b> {tag}\n"
+        f"📄 <b>عدد الصفحات:</b> {pages} صفحة (جودة متجهة Vector فائقة الوضوح)\n"
+        f"💵 <b>السعر المطلوب:</b> <code>{price}</code> ج.م فقط\n"
+        f"🛡️ <b>مستوى الأمان:</b> حماية ضد التسريب + علامات مائية مشفرة\n\n"
+        f"📝 <b>الوصف والملخص:</b>\n{desc}\n\n"
         f"اضغط على الزر بالأسفل لبدء تخصيص الأختام باسمك وهاتفك 👇"
     )
 
     await callback.message.edit_text(
         text=detail_text,
         reply_markup=get_material_actions_keyboard(mat_id),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
     await callback.answer()
 

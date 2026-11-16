@@ -2262,6 +2262,94 @@ class TestAdminManagementAndPermissions(unittest.TestCase):
 
         asyncio.run(_run())
 
+    def test_04_handlers_escape_special_chars_for_telegram_html(self):
+        """التحقق من عدم تعطل /start أو البطاقات عندما يحتوي اسم المستخدم أو النص على _ * < > &."""
+        import asyncio
+        import xml.etree.ElementTree as ET
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+        import bot_service.handlers.start as start_mod
+        import bot_service.handlers.catalog as catalog_mod
+        import bot_service.handlers.admin as admin_mod
+
+        tricky_name = "Ahmed_2026 *Pro* <VIP> & [1]"
+        sent = []
+
+        async def _capture_answer(text, **kwargs):
+            sent.append((text, kwargs.get("parse_mode")))
+
+        class _FakeState:
+            async def clear(self):
+                pass
+
+        async def _run():
+            start_msg = SimpleNamespace(
+                from_user=SimpleNamespace(id=8610545543, full_name=tricky_name, username="ahmed_vip"),
+                chat=SimpleNamespace(id=8610545543),
+                text="/start",
+                bot=SimpleNamespace(set_chat_menu_button=AsyncMock()),
+                answer=_capture_answer,
+            )
+            with (
+                patch.object(start_mod.bridge_client, "sync_session", AsyncMock(return_value={})),
+                patch.object(start_mod.bridge_client, "get_teacher_profile", AsyncMock(return_value=None)),
+            ):
+                await start_mod.handle_start(start_msg, _FakeState())
+
+            with patch.object(
+                catalog_mod.bridge_client,
+                "get_materials",
+                AsyncMock(return_value=[{
+                    "id": 77,
+                    "title": "Physics_3rd *Sec* <2026> & Notes",
+                    "tag": "فيزياء_ثانوي",
+                    "price": 120,
+                    "total_pages": 40,
+                    "description": "شرح <كامل> & تدريبات *مكثفة*_جداً",
+                }]),
+            ):
+                edited = []
+
+                async def _edit_text(text, **kwargs):
+                    edited.append((text, kwargs.get("parse_mode")))
+
+                cb_mat = SimpleNamespace(
+                    from_user=SimpleNamespace(id=8610545543),
+                    data="mat_detail:77",
+                    answer=AsyncMock(),
+                    message=SimpleNamespace(edit_text=_edit_text),
+                )
+                await catalog_mod.handle_material_detail(cb_mat)
+                sent.extend(edited)
+
+            with patch.object(
+                admin_mod.bridge_client,
+                "get_admin_stats",
+                AsyncMock(return_value={
+                    "recent_unmatched_sms": [{
+                        "id": 9,
+                        "source_provider": "VF_Cash_<Test>",
+                        "extracted_amount": 150,
+                        "extracted_sender": "010_999*888",
+                        "reference_number": "REF_1<2>&3",
+                    }],
+                }),
+            ):
+                cb_sms = SimpleNamespace(
+                    from_user=SimpleNamespace(id=8287744705),
+                    answer=AsyncMock(),
+                    message=SimpleNamespace(answer=_capture_answer),
+                )
+                await admin_mod.handle_admin_sms_feed(cb_sms)
+
+        asyncio.run(_run())
+        self.assertGreaterEqual(len(sent), 3)
+        for text, pmode in sent:
+            self.assertEqual(pmode, "HTML")
+            # كل رسالة يجب أن تكون XML/HTML صالحة لـ Telegram دون وسوم أو كيانات مكسورة
+            ET.fromstring(f"<root>{text}</root>")
+        self.assertIn("Ahmed_2026 *Pro* &lt;VIP&gt; &amp; [1]", sent[0][0])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

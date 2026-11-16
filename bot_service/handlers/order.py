@@ -91,16 +91,16 @@ async def handle_order_start(callback: CallbackQuery, state: FSMContext):
     if profile and (bot_config.is_admin(user_id) or stamp_settings.has_any_available_stamp_data(profile)):
         # المدرس لديه ملف مسجل مسبقاً -> خيار بنقرة واحدة
         p_text = (
-            f"⚡ **لديك ملف تعريفي مسجل مسبقاً!**\n\n"
-            f"👤 **المدرس:** {profile.get('teacher_name') or 'بدون اسم'}\n"
-            f"📱 **الموبايل:** `{profile.get('primary_phone') or 'بدون رقم'}`\n"
-            f"📚 **السلسلة:** {profile.get('series_title') or 'تلقائي'}\n\n"
-            f"هل ترغب باستخدام بياناتك المحفوظة فوراً لختم **{mat.get('title')}**؟"
+            f"⚡ <b>لديك ملف تعريفي مسجل مسبقاً!</b>\n\n"
+            f"👤 <b>المدرس:</b> {html.escape(str(profile.get('teacher_name') or 'بدون اسم'))}\n"
+            f"📱 <b>الموبايل:</b> <code>{html.escape(str(profile.get('primary_phone') or 'بدون رقم'))}</code>\n"
+            f"📚 <b>السلسلة:</b> {html.escape(str(profile.get('series_title') or 'تلقائي'))}\n\n"
+            f"هل ترغب باستخدام بياناتك المحفوظة فوراً لختم <b>{html.escape(str(mat.get('title') or ''))}</b>؟"
         )
         await callback.message.edit_text(
             text=p_text,
             reply_markup=get_profile_decision_keyboard(profile, mat_id),
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
     else:
         # ليس لديه ملف -> بدء المعالج التفاعلي

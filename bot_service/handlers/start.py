@@ -2,6 +2,7 @@
 # bot_service/handlers/start.py — الترحيب والتهيئة وقائمة البداية
 # ================================================================
 
+import html
 import logging
 from aiogram import Router, F
 from aiogram.filters import CommandStart, Command
@@ -106,20 +107,24 @@ async def handle_start(message: Message, state: FSMContext):
 
     profile_status_text = ""
     if profile:
+        t_name = html.escape(str(profile.get('teacher_name') or 'غير محدد'))
+        t_phone = html.escape(str(profile.get('primary_phone') or 'غير محدد'))
+        t_series = html.escape(str(profile.get('series_title') or 'غير محدد'))
         profile_status_text = (
-            f"👤 **الملف المحفوظ:** {profile.get('teacher_name')}\n"
-            f"📱 **رقم التواصل:** `{profile.get('primary_phone')}`\n"
-            f"📚 **السلسلة:** {profile.get('series_title') or 'غير محدد'}\n"
+            f"👤 <b>الملف المحفوظ:</b> {t_name}\n"
+            f"📱 <b>رقم التواصل:</b> <code>{t_phone}</code>\n"
+            f"📚 <b>السلسلة:</b> {t_series}\n"
             f"✨ بياناتك جاهزة للختم الفوري بنقرة واحدة!"
         )
     else:
         profile_status_text = (
-            "⚠️ **تنبيه:** لم تقم بتسجيل بيانات الختم الخاصة بك بعد.\n"
-            "اضغط على زر `👤 بيانات الختم الخاصة بي` لتسجيل اسمك ورقمك مرة واحدة."
+            "⚠️ <b>تنبيه:</b> لم تقم بتسجيل بيانات الختم الخاصة بك بعد.\n"
+            "اضغط على زر <code>👤 بيانات الختم الخاصة بي</code> لتسجيل اسمك ورقمك مرة واحدة."
         )
 
+    safe_user_name = html.escape(str(user_name))
     welcome_text = (
-        f"مرحباً بك يا {user_name} في **منصة Z-PACT الذكية للمذكرات والمستندات** 🎓✨\n\n"
+        f"مرحباً بك يا {safe_user_name} في <b>منصة Z-PACT الذكية للمذكرات والمستندات</b> 🎓✨\n\n"
         f"نظام متكامل لطلب وتحميل مذكراتك التعليمية مختومة برقمك واسمك بدقة متجهة فائقة، "
         f"مع حماية رقمية متطورة ضد التسريب وإعادة المشاركة.\n\n"
         f"────────────────────\n"
@@ -131,7 +136,7 @@ async def handle_start(message: Message, state: FSMContext):
     await message.answer(
         text=welcome_text,
         reply_markup=get_main_keyboard(is_admin=is_admin),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
     # تحديث زر القائمة الدائم للمحادثة الحالية وإظهار زر فتح سريع بآخر رابط حي
@@ -148,13 +153,13 @@ async def handle_start(message: Message, state: FSMContext):
         except Exception:
             pass
         await message.answer(
-            "⚡ **يمكنك أيضاً فتح المتجر ومحاكي الختم التفاعلي بنقرة واحدة من هنا:**",
+            "⚡ <b>يمكنك أيضاً فتح المتجر ومحاكي الختم التفاعلي بنقرة واحدة من هنا:</b>",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[[
                     InlineKeyboardButton(text="🚀 فتح المتجر والتطبيق الذكي (Mini App)", web_app=WebAppInfo(url=live_url))
                 ]]
             ),
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
 
 
@@ -246,17 +251,17 @@ async def handle_admin_auth(message: Message):
     """أمر المصادقة السريع للأدمن برمز المرور السري"""
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        await message.answer("⚠️ الصيغة: `/admin_auth <الرمز_السري>`", parse_mode="Markdown")
+        await message.answer("⚠️ الصيغة: <code>/admin_auth &lt;الرمز_السري&gt;</code>", parse_mode="HTML")
         return
 
     secret = args[1].strip()
     if secret == bot_config.ADMIN_PASSCODE:
         bot_config.add_admin(message.from_user.id)
         await message.answer(
-            "👑 **تمت ترقية حسابك إلى مسؤول النظام (Admin) بنجاح!**\n"
-            "يمكنك الآن استخدام أمر `/admin` أو زر لوحة التحكم.",
+            "👑 <b>تمت ترقية حسابك إلى مسؤول النظام (Admin) بنجاح!</b>\n"
+            "يمكنك الآن استخدام أمر <code>/admin</code> أو زر لوحة التحكم.",
             reply_markup=get_main_keyboard(is_admin=True),
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
     else:
         await message.answer("⛔ رمز المرور السري غير صحيح!")
@@ -284,23 +289,23 @@ async def show_teacher_profile(message: Message):
 
     if profile:
         text = (
-            f"👤 **بيانات الختم المعتمدة الخاصة بك:**\n\n"
-            f"👨‍🏫 **اسم المدرس بالختم:** {profile.get('teacher_name')}\n"
-            f"📱 **رقم الموبايل الأساسي:** `{profile.get('primary_phone')}`\n"
-            f"📞 **رقم الموبايل الإضافي:** {profile.get('secondary_phone') or 'غير مسجل'}\n"
-            f"🔬 **المادة والتخصص:** {profile.get('subject_specialty') or 'عام'}\n"
-            f"📚 **اسم السلسلة:** {profile.get('series_title') or 'تلقائي'}\n"
-            f"💧 **العلامة المائية:** {profile.get('watermark_text') or 'الافتراضي'}\n\n"
-            f"لتحديث هذه البيانات، أرسل الأمر: `/edit_profile`"
+            f"👤 <b>بيانات الختم المعتمدة الخاصة بك:</b>\n\n"
+            f"👨‍🏫 <b>اسم المدرس بالختم:</b> {html.escape(str(profile.get('teacher_name') or 'غير محدد'))}\n"
+            f"📱 <b>رقم الموبايل الأساسي:</b> <code>{html.escape(str(profile.get('primary_phone') or 'غير محدد'))}</code>\n"
+            f"📞 <b>رقم الموبايل الإضافي:</b> {html.escape(str(profile.get('secondary_phone') or 'غير مسجل'))}\n"
+            f"🔬 <b>المادة والتخصص:</b> {html.escape(str(profile.get('subject_specialty') or 'عام'))}\n"
+            f"📚 <b>اسم السلسلة:</b> {html.escape(str(profile.get('series_title') or 'تلقائي'))}\n"
+            f"💧 <b>العلامة المائية:</b> {html.escape(str(profile.get('watermark_text') or 'الافتراضي'))}\n\n"
+            f"لتحديث هذه البيانات، أرسل الأمر: <code>/edit_profile</code>"
         )
     else:
         text = (
-            "⚠️ **ليس لديك ملف تعريفي مسجل بعد!**\n\n"
+            "⚠️ <b>ليس لديك ملف تعريفي مسجل بعد!</b>\n\n"
             "تسجيل بياناتك يتيح للنظام ختم مذكراتك تلقائياً باسمك وأرقامك بنقرة زر واحدة.\n"
-            "للبدء في تسجيل بياناتك الآن، أرسل الأمر: `/edit_profile`"
+            "للبدء في تسجيل بياناتك الآن، أرسل الأمر: <code>/edit_profile</code>"
         )
 
-    await message.answer(text, parse_mode="Markdown")
+    await message.answer(text, parse_mode="HTML")
 
 
 @router.message(Command("edit_profile"))
@@ -308,10 +313,10 @@ async def start_profile_edit(message: Message, state: FSMContext):
     """بدء معالج تعديل بيانات الختم"""
     await state.set_state(TeacherProfileStates.waiting_name)
     await message.answer(
-        "✍️ **الخطوة [1/5]:** ما هو اسمك الأكاديمي الذي ترغب بظهوره على أختام المذكرة؟\n"
-        "*(مثال: أ/ محمد عبد الرحمن — أو اضغط 'تخطي ⏩' للاكتفاء ببيان آخر)*",
+        "✍️ <b>الخطوة [1/5]:</b> ما هو اسمك الأكاديمي الذي ترغب بظهوره على أختام المذكرة؟\n"
+        "<i>(مثال: أ/ محمد عبد الرحمن — أو اضغط 'تخطي ⏩' للاكتفاء ببيان آخر)</i>",
         reply_markup=get_skip_keyboard(),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 
@@ -330,10 +335,10 @@ async def process_profile_name(message: Message, state: FSMContext):
     await state.update_data(teacher_name=name)
     await state.set_state(TeacherProfileStates.waiting_phone_1)
     await message.answer(
-        "📱 **الخطوة [2/5]:** أدخل رقم الموبايل الأساسي للتواصل:\n"
-        "*(مثال: 01012345678 — أو اضغط 'تخطي ⏩')*",
+        "📱 <b>الخطوة [2/5]:</b> أدخل رقم الموبايل الأساسي للتواصل:\n"
+        "<i>(مثال: 01012345678 — أو اضغط 'تخطي ⏩')</i>",
         reply_markup=get_skip_keyboard(),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 
@@ -353,10 +358,10 @@ async def process_profile_phone_1(message: Message, state: FSMContext):
     await state.update_data(primary_phone=phone)
     await state.set_state(TeacherProfileStates.waiting_phone_2)
     await message.answer(
-        "📞 **الخطوة [3/5]:** هل لديك رقم هاتف ثانٍ ترغب بظهوره بالتبادل على الصفحات الزوجية؟\n"
-        "*(يمكنك الضغط على 'تخطي ⏩' إذا كنت تستخدم رقماً واحداً فقط)*",
+        "📞 <b>الخطوة [3/5]:</b> هل لديك رقم هاتف ثانٍ ترغب بظهوره بالتبادل على الصفحات الزوجية؟\n"
+        "<i>(يمكنك الضغط على 'تخطي ⏩' إذا كنت تستخدم رقماً واحداً فقط)</i>",
         reply_markup=get_skip_keyboard(),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 
@@ -368,10 +373,10 @@ async def process_profile_phone_2(message: Message, state: FSMContext):
     await state.update_data(secondary_phone=phone_2)
     await state.set_state(TeacherProfileStates.waiting_series)
     await message.answer(
-        "📚 **الخطوة [4/5]:** ما هو اسم السلسلة أو الشعار التعليمي الخاص بك؟\n"
-        "*(مثال: سلسلة البرهان ، سلسلة التفوق ، أو اضغط 'تخطي ⏩')*",
+        "📚 <b>الخطوة [4/5]:</b> ما هو اسم السلسلة أو الشعار التعليمي الخاص بك؟\n"
+        "<i>(مثال: سلسلة البرهان ، سلسلة التفوق ، أو اضغط 'تخطي ⏩')</i>",
         reply_markup=get_skip_keyboard(),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 
@@ -383,10 +388,10 @@ async def process_profile_series(message: Message, state: FSMContext):
     await state.update_data(series_title=series)
     await state.set_state(TeacherProfileStates.waiting_watermark)
     await message.answer(
-        "💧 **الخطوة [5/5]:** هل ترغب بكتابة نص مخصص للعلامة المائية المائلة في خلفية الصفحات؟\n"
-        "*(مثال: خاص لطلاب الأستاذ أحمد أو لا يجوز تصوير المذكرة — أو اضغط 'تخطي ⏩')*",
+        "💧 <b>الخطوة [5/5]:</b> هل ترغب بكتابة نص مخصص للعلامة المائية المائلة في خلفية الصفحات؟\n"
+        "<i>(مثال: خاص لطلاب الأستاذ أحمد أو لا يجوز تصوير المذكرة — أو اضغط 'تخطي ⏩')</i>",
         reply_markup=get_skip_keyboard(),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 
@@ -408,10 +413,10 @@ async def process_profile_finish(message: Message, state: FSMContext):
     if not ok_stamp:
         await state.set_state(TeacherProfileStates.waiting_name)
         await message.answer(
-            f"⚠️ {err_msg or stamp_settings.MISSING_STAMP_DATA_MESSAGE_AR}\n\n"
-            f"✍️ **الخطوة [1/5]:** أدخل اسمك الأكاديمي (أو اضغط 'تخطي ⏩' لإدخال الهاتف أو اسم السلسلة):",
+            f"⚠️ {html.escape(str(err_msg or stamp_settings.MISSING_STAMP_DATA_MESSAGE_AR))}\n\n"
+            f"✍️ <b>الخطوة [1/5]:</b> أدخل اسمك الأكاديمي (أو اضغط 'تخطي ⏩' لإدخال الهاتف أو اسم السلسلة):",
             reply_markup=get_skip_keyboard(),
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
         return
 
@@ -426,13 +431,13 @@ async def process_profile_finish(message: Message, state: FSMContext):
 
     if saved:
         await message.answer(
-            f"🎉 **تم حفظ وتأكيد بيانات الختم الخاصة بك بنجاح!**\n\n"
-            f"👨‍🏫 **الاسم:** {saved.get('teacher_name') or 'غير محدد'}\n"
-            f"📱 **الهاتف:** {saved.get('primary_phone') or 'غير محدد'}\n"
-            f"📚 **السلسلة:** {saved.get('series_title') or 'تلقائي'}\n\n"
+            f"🎉 <b>تم حفظ وتأكيد بيانات الختم الخاصة بك بنجاح!</b>\n\n"
+            f"👨‍🏫 <b>الاسم:</b> {html.escape(str(saved.get('teacher_name') or 'غير محدد'))}\n"
+            f"📱 <b>الهاتف:</b> <code>{html.escape(str(saved.get('primary_phone') or 'غير محدد'))}</code>\n"
+            f"📚 <b>السلسلة:</b> {html.escape(str(saved.get('series_title') or 'تلقائي'))}\n\n"
             f"عند طلب أي مذكرة، سيتم ختمها بهذه البيانات تلقائياً بنقرة واحدة! 🚀",
             reply_markup=get_main_keyboard(is_admin=is_admin),
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
     else:
         await message.answer(
@@ -453,9 +458,9 @@ async def show_user_orders(message: Message):
 
     if not orders:
         await message.answer(
-            "📭 **ليس لديك أي طلبات سابقة حتى الآن.**\n\n"
-            "يمكنك استعراض المذكرات المتاحة والطلب فوراً عبر الضغط على: `📚 تصفح المذكرات والطلب`.",
-            parse_mode="Markdown"
+            "📭 <b>ليس لديك أي طلبات سابقة حتى الآن.</b>\n\n"
+            "يمكنك استعراض المذكرات المتاحة والطلب فوراً عبر الضغط على: <code>📚 تصفح المذكرات والطلب</code>.",
+            parse_mode="HTML"
         )
         return
 
@@ -469,46 +474,46 @@ async def show_user_orders(message: Message):
         "cancelled": "❌ تم إلغاء الطلب"
     }
 
-    text = f"📦 **سجل طلباتك الأحدث ({len(orders)}):**\n\n"
+    text = f"📦 <b>سجل طلباتك الأحدث ({len(orders)}):</b>\n\n"
     for o in orders[:5]:
-        code = o.get("order_code")
-        mat_title = o.get("material", {}).get("title") if o.get("material") else "مذكرة تعليمية"
-        amt = o.get("total_amount", 0)
+        code = html.escape(str(o.get("order_code") or ""))
+        mat_title = html.escape(str(o.get("material", {}).get("title") if o.get("material") else "مذكرة تعليمية"))
+        amt = html.escape(str(o.get("total_amount", 0)))
         status_key = o.get("status", "pending_payment")
-        status_text = status_labels.get(status_key, status_key)
-        created_at = (o.get("created_at") or "")[:10]
+        status_text = html.escape(str(status_labels.get(status_key, status_key)))
+        created_at = html.escape(str((o.get("created_at") or "")[:10]))
 
         text += (
-            f"🔖 **الطلب:** `{code}` — {mat_title}\n"
-            f"📅 **التاريخ:** {created_at} | 💵 **القيمة:** {amt} ج.م\n"
-            f"📊 **الحالة:** {status_text}\n"
+            f"🔖 <b>الطلب:</b> <code>{code}</code> — {mat_title}\n"
+            f"📅 <b>التاريخ:</b> {created_at} | 💵 <b>القيمة:</b> {amt} ج.م\n"
+            f"📊 <b>الحالة:</b> {status_text}\n"
             f"────────────────────\n"
         )
 
-    await message.answer(text, parse_mode="Markdown")
+    await message.answer(text, parse_mode="HTML")
 
 
 @router.message(F.text == "💳 شحن الرصيد والدفع")
 async def show_payment_info(message: Message):
     """عرض معلومات وسائل الدفع المعتمدة والتحويل"""
-    wallet1 = bot_config.PAYMENT_WALLET_NUMBER
-    wallet2 = getattr(bot_config, "PAYMENT_WALLET_NUMBER_2", "01032881402")
-    instapay = bot_config.INSTAPAY_ADDRESS
+    wallet1 = html.escape(str(bot_config.PAYMENT_WALLET_NUMBER))
+    wallet2 = html.escape(str(getattr(bot_config, "PAYMENT_WALLET_NUMBER_2", "01032881402")))
+    instapay = html.escape(str(bot_config.INSTAPAY_ADDRESS))
 
     text = (
-        "💳 **وسائل الدفع والشحن المعتمدة في منصة Z-PACT:**\n\n"
+        "💳 <b>وسائل الدفع والشحن المعتمدة في منصة Z-PACT:</b>\n\n"
         "يمكنك سداد رسوم المذكرات والطلبات عبر القنوات التالية مباشرة:\n\n"
-        f"📱 **محافظ فودافون كاش المعتمدة (اضغط للنسخ):**\n"
-        f"👉 ` {wallet1} `\n"
-        f"👉 ` {wallet2} `\n\n"
-        f"⚡ **تطبيق إنستاباي (رقم الهاتف):**\n"
-        f"👉 ` {instapay} ` *(اضغط للنسخ)*\n\n"
+        f"📱 <b>محافظ فودافون كاش المعتمدة (اضغط للنسخ):</b>\n"
+        f"👉 <code>{wallet1}</code>\n"
+        f"👉 <code>{wallet2}</code>\n\n"
+        f"⚡ <b>تطبيق إنستاباي (رقم الهاتف):</b>\n"
+        f"👉 <code>{instapay}</code> <i>(اضغط للنسخ)</i>\n\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        "💡 **كيف يعمل النظام؟**\n"
+        "💡 <b>كيف يعمل النظام؟</b>\n"
         "عند طلبك لأي مذكرة من الكتالوج، يمنحك البوت كود طلب فريد ورابط مباشر لتأكيد السداد فورياً، "
         "مع فحص آلي لحظي لرسائل التحويل البنكية لختم ملفك في ثوانٍ معدودة!"
     )
-    await message.answer(text, parse_mode="Markdown")
+    await message.answer(text, parse_mode="HTML")
 
 
 @router.message(F.text == "🌐 فتح التطبيق التفاعلي (Mini App)")
@@ -538,26 +543,26 @@ async def handle_miniapp_request(event: Message | CallbackQuery):
         ]])
 
     text = (
-        "🌐 **التطبيق التفاعلي للمنصة (Telegram Mini App & PWA)**\n\n"
-        f"🔗 **رابط المعاينة المباشر النشط الآن:**\n"
-        f"`{clean_url}`\n\n"
-        "✨ *الميزات المتوفرة داخل التطبيق:*\n"
+        "🌐 <b>التطبيق التفاعلي للمنصة (Telegram Mini App &amp; PWA)</b>\n\n"
+        f"🔗 <b>رابط المعاينة المباشر النشط الآن:</b>\n"
+        f"<code>{html.escape(str(clean_url))}</code>\n\n"
+        "✨ <i>الميزات المتوفرة داخل التطبيق:</i>\n"
         "• 🎨 محاكي الختم الحي لورقة A4 ومعاينة العلامة المائية لحظياً.\n"
         "• 📚 استعراض وتصفية كتالوج المذكرات والطلب المباشر.\n"
         "• 📦 متابعة فورية لحالات طلباتك وتحميل الـ PDF.\n\n"
     )
     if is_https:
-        text += "💡 *اضغط على الزر أدناه لفتح التطبيق كنافذة مدمجة داخل تيليجرام فوراً!*"
+        text += "💡 <i>اضغط على الزر أدناه لفتح التطبيق كنافذة مدمجة داخل تيليجرام فوراً!</i>"
     else:
         text += (
-            "💡 *ملاحظة:* يفرض تطبيق تليجرام روابط مشفرة (HTTPS) لفتح النوافذ المنبثقة التفاعلية داخل المحادثة مباشرة. "
+            "💡 <i>ملاحظة:</i> يفرض تطبيق تليجرام روابط مشفرة (HTTPS) لفتح النوافذ المنبثقة التفاعلية داخل المحادثة مباشرة. "
             "قم بتشغيل النفق المشفر (Cloudflare Tunnel) ليظهر زر الفتح الفوري."
         )
 
     if isinstance(event, CallbackQuery):
-        await event.message.answer(text, reply_markup=reply_markup, parse_mode="Markdown")
+        await event.message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
         await event.answer()
     else:
-        await event.answer(text, reply_markup=reply_markup, parse_mode="Markdown")
+        await event.answer(text, reply_markup=reply_markup, parse_mode="HTML")
 
 

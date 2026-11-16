@@ -51,36 +51,36 @@ def _build_dashboard_text(user_id: int, stats: dict, compact: bool = False) -> s
         role_badge = f"🛡️ مشرف بصلاحيات مخصصة ({enabled_cnt}/{len(PERM_KEYS)})"
 
     lines = [
-        f"👑 **لوحة قيادة إدارة منصة Z-PACT** 🛡️",
-        f"🔐 **مستوى حسابك:** `{role_badge}`\n",
+        "👑 <b>لوحة قيادة إدارة منصة Z-PACT</b> 🛡️",
+        f"🔐 <b>مستوى حسابك:</b> <code>{html.escape(role_badge)}</code>\n",
     ]
     if perms.get("orders_finance"):
         lines.extend([
-            "📊 **مؤشرات الأداء اللحظية:**",
-            f"  • إجمالي الطلبات: `{stats.get('total_orders', 0)}` طلب",
-            f"  • طلبات بانتظار التأكيد: `🟡 {stats.get('pending_orders', 0)}`",
-            f"  • طلبات مكتملة ومسلمة: `🟢 {stats.get('completed_orders', 0)}`\n",
+            "📊 <b>مؤشرات الأداء اللحظية:</b>",
+            f"  • إجمالي الطلبات: <code>{html.escape(str(stats.get('total_orders', 0)))}</code> طلب",
+            f"  • طلبات بانتظار التأكيد: <code>🟡 {html.escape(str(stats.get('pending_orders', 0)))}</code>",
+            f"  • طلبات مكتملة ومسلمة: <code>🟢 {html.escape(str(stats.get('completed_orders', 0)))}</code>\n",
         ])
     if perms.get("materials") or perms.get("batch_vip") or perms.get("orders_finance"):
         lines.extend([
-            "👨‍🏫 **المعلمون والمحتوى:**",
-            f"  • عدد المدرسين المسجلين: `{stats.get('total_teachers', 0)}` مدرس",
-            f"  • المذكرات المنشورة بالمتجر: `{stats.get('total_materials', 0)}` مذكرة\n",
+            "👨‍🏫 <b>المعلمون والمحتوى:</b>",
+            f"  • عدد المدرسين المسجلين: <code>{html.escape(str(stats.get('total_teachers', 0)))}</code> مدرس",
+            f"  • المذكرات المنشورة بالمتجر: <code>{html.escape(str(stats.get('total_materials', 0)))}</code> مذكرة\n",
         ])
     if perms.get("orders_finance"):
         lines.extend([
-            "📱 **محرك الـ SMS Webhook:**",
-            f"  • إجمالي رسائل التحويل: `{stats.get('total_sms_logs', 0)}`",
-            f"  • تحويلات غير مطابقة: `⚠️ {stats.get('unreconciled_sms_logs', 0)}`\n",
+            "📱 <b>محرك الـ SMS Webhook:</b>",
+            f"  • إجمالي رسائل التحويل: <code>{html.escape(str(stats.get('total_sms_logs', 0)))}</code>",
+            f"  • تحويلات غير مطابقة: <code>⚠️ {html.escape(str(stats.get('unreconciled_sms_logs', 0)))}</code>\n",
         ])
     if perms.get("apks_settings") and not compact:
         live_miniapp = bot_config.get_live_miniapp_url(cache_bust=False)
         lines.extend([
-            "💳 **بيانات الاستقبال والروابط:**",
-            f"  • رقم المحفظة: `{bot_config.PAYMENT_WALLET_NUMBER}`",
-            f"  • عنوان إنستاباي: `{bot_config.INSTAPAY_ADDRESS}`",
-            f"  • رابط الميني آب: `{live_miniapp}`",
-            "  *(للأوامر: `/set_wallet` | `/set_instapay` | `/set_miniapp` | `/get_apk`)*\n",
+            "💳 <b>بيانات الاستقبال والروابط:</b>",
+            f"  • رقم المحفظة: <code>{html.escape(str(bot_config.PAYMENT_WALLET_NUMBER))}</code>",
+            f"  • عنوان إنستاباي: <code>{html.escape(str(bot_config.INSTAPAY_ADDRESS))}</code>",
+            f"  • رابط الميني آب: <code>{html.escape(str(live_miniapp))}</code>",
+            "  <i>(للأوامر: <code>/set_wallet</code> | <code>/set_instapay</code> | <code>/set_miniapp</code> | <code>/get_apk</code>)</i>\n",
         ])
     lines.append("اختر القسم المطلوب من الأزرار التفاعلية أدناه 👇")
     return "\n".join(lines)
@@ -106,7 +106,7 @@ async def handle_admin_dashboard(message: Message):
     await message.answer(
         text=_build_dashboard_text(uid, stats, compact=False),
         reply_markup=get_admin_main_keyboard(uid),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 
@@ -124,7 +124,7 @@ async def handle_admin_stats_callback(callback: CallbackQuery):
 
     text = _build_dashboard_text(uid, stats, compact=True)
     try:
-        await callback.message.edit_text(text, reply_markup=get_admin_main_keyboard(uid), parse_mode="Markdown")
+        await callback.message.edit_text(text, reply_markup=get_admin_main_keyboard(uid), parse_mode="HTML")
     except Exception:
         pass
     await callback.answer("تم التحديث ✅")
@@ -211,18 +211,18 @@ async def handle_admin_action_click(callback: CallbackQuery):
         return
 
     if action == "force_approve":
-        msg = f"✅ **تمت الموافقة الفورية على الطلب `{order_code}`!**\nجاري تشغيل الختم وإرسال الـ PDF للعميل فوراً."
-        await callback.message.reply(msg, parse_mode="Markdown")
+        msg = f"✅ <b>تمت الموافقة الفورية على الطلب <code>{html.escape(str(order_code))}</code>!</b>\nجاري تشغيل الختم وإرسال الـ PDF للعميل فوراً."
+        await callback.message.reply(msg, parse_mode="HTML")
         await callback.answer("تمت الموافقة وجاري الختم ✅")
 
     elif action == "retrigger":
-        msg = f"🔄 **تمت إعادة إطلاق مهمة الختم للطلب `{order_code}`!**"
-        await callback.message.reply(msg, parse_mode="Markdown")
+        msg = f"🔄 <b>تمت إعادة إطلاق مهمة الختم للطلب <code>{html.escape(str(order_code))}</code>!</b>"
+        await callback.message.reply(msg, parse_mode="HTML")
         await callback.answer("جاري إعادة الختم 🔄")
 
     elif action == "reject":
-        msg = f"❌ **تم رفض الطلب `{order_code}` وإبلاغ العميل.**"
-        await callback.message.reply(msg, parse_mode="Markdown")
+        msg = f"❌ <b>تم رفض الطلب <code>{html.escape(str(order_code))}</code> وإبلاغ العميل.</b>"
+        await callback.message.reply(msg, parse_mode="HTML")
         await callback.answer("تم الرفض ❌")
 
 
@@ -266,11 +266,11 @@ async def process_admin_reply_to_user(message: Message, state: FSMContext, bot: 
         if message.text:
             await bot.send_message(
                 chat_id=target_chat_id,
-                text=f"{admin_header}{message.text}\n━━━━━━━━━━━━━━━━━━\n<i>يمكنك الرد في أي وقت عبر زر الدعم الفني.</i>",
+                text=f"{admin_header}{html.escape(message.text)}\n━━━━━━━━━━━━━━━━━━\n<i>يمكنك الرد في أي وقت عبر زر الدعم الفني.</i>",
                 parse_mode="HTML"
             )
         elif message.photo:
-            caption = message.caption or ""
+            caption = html.escape(message.caption or "")
             await bot.send_photo(
                 chat_id=target_chat_id,
                 photo=message.photo[-1].file_id,
@@ -308,28 +308,28 @@ async def handle_admin_sms_feed(callback: CallbackQuery):
     unmatched_sms = stats.get("recent_unmatched_sms", []) if stats else []
 
     if not unmatched_sms:
-        await callback.message.answer("✅ **ممتاز! جميع رسائل الـ SMS الواردة تم مطابقتها واستهلاكها بالكامل.**")
+        await callback.message.answer("✅ <b>ممتاز! جميع رسائل الـ SMS الواردة تم مطابقتها واستهلاكها بالكامل.</b>", parse_mode="HTML")
         await callback.answer()
         return
 
-    text = f"📩 **رسائل الـ SMS المعلقة غير المطابقة ({len(unmatched_sms)}):**\n\n"
+    text = f"📩 <b>رسائل الـ SMS المعلقة غير المطابقة ({len(unmatched_sms)}):</b>\n\n"
     for s in unmatched_sms[:6]:
-        sid = s.get("id")
-        provider = s.get("source_provider")
-        amt = s.get("extracted_amount")
-        sender = s.get("extracted_sender") or "مجهول"
-        ref = s.get("reference_number") or "بدون مرجع"
+        sid = html.escape(str(s.get("id") or ""))
+        provider = html.escape(str(s.get("source_provider") or ""))
+        amt = html.escape(str(s.get("extracted_amount") or ""))
+        sender = html.escape(str(s.get("extracted_sender") or "مجهول"))
+        ref = html.escape(str(s.get("reference_number") or "بدون مرجع"))
 
         text += (
-            f"🆔 **معرف الرسالة:** `{sid}`\n"
-            f"🏦 **الخدمة:** {provider}\n"
-            f"💵 **المبلغ:** `{amt}` ج.م\n"
-            f"📱 **من:** `{sender}`\n"
-            f"🔖 **المرجع:** `{ref}`\n"
+            f"🆔 <b>معرف الرسالة:</b> <code>{sid}</code>\n"
+            f"🏦 <b>الخدمة:</b> {provider}\n"
+            f"💵 <b>المبلغ:</b> <code>{amt}</code> ج.م\n"
+            f"📱 <b>من:</b> <code>{sender}</code>\n"
+            f"🔖 <b>المرجع:</b> <code>{ref}</code>\n"
             f"────────────────────\n"
         )
 
-    await callback.message.answer(text, parse_mode="Markdown")
+    await callback.message.answer(text, parse_mode="HTML")
     await callback.answer()
 
 
@@ -1204,8 +1204,13 @@ async def handle_v3_bundle_inline_action(callback: CallbackQuery):
     if not res:
         await callback.answer("فشل تنفيذ الإجراء", show_alert=True)
         return
-    msg = f"✅ تمت الموافقة على السلة `{bcode}` وجاري ختم وإرسال كل المذكرات فوراً!" if action == "approve" else f"❌ تم رفض السلة `{bcode}`."
-    await callback.message.reply(msg, parse_mode="Markdown")
+    safe_bcode = html.escape(str(bcode))
+    msg = (
+        f"✅ تمت الموافقة على السلة <code>{safe_bcode}</code> وجاري ختم وإرسال كل المذكرات فوراً!"
+        if action == "approve"
+        else f"❌ تم رفض السلة <code>{safe_bcode}</code>."
+    )
+    await callback.message.reply(msg, parse_mode="HTML")
     await callback.answer("تم التنفيذ ✅")
 
 

@@ -34,36 +34,36 @@ async def handle_payment_method_selected(callback: CallbackQuery, state: FSMCont
 
     if method == "vodafone_cash":
         instruction = (
-            f"📱 **طريقة الدفع: فودافون كاش (Vodafone Cash)**\n\n"
-            f"💵 **المبلغ المطلوب تحويله:** `{total_amount}` ج.م\n"
-            f"📞 **أرقام المحافظ المعتمدة للتحويل (اضغط لنسخ الرقم):**\n"
-            f"  1️⃣ `{bot_config.PAYMENT_WALLET_NUMBER}`\n"
-            f"  2️⃣ `{bot_config.PAYMENT_WALLET_NUMBER_2}`\n\n"
-            f"⚠️ **الخطوات المطلوبة:**\n"
+            f"📱 <b>طريقة الدفع: فودافون كاش (Vodafone Cash)</b>\n\n"
+            f"💵 <b>المبلغ المطلوب تحويله:</b> <code>{html.escape(str(total_amount))}</code> ج.م\n"
+            f"📞 <b>أرقام المحافظ المعتمدة للتحويل (اضغط لنسخ الرقم):</b>\n"
+            f"  1️⃣ <code>{html.escape(str(bot_config.PAYMENT_WALLET_NUMBER))}</code>\n"
+            f"  2️⃣ <code>{html.escape(str(bot_config.PAYMENT_WALLET_NUMBER_2))}</code>\n\n"
+            f"⚠️ <b>الخطوات المطلوبة:</b>\n"
             f"1. قم بالتحويل من محفظتك إلى أي من الرقمين أعلاه.\n"
             f"2. التقط سكرين شوت (Screenshot) لرسالة أو إيصال نجاح التحويل.\n\n"
-            f"👉 **أدخل الآن رقم الهاتف الذي قمت بالتحويل منه:**"
+            f"👉 <b>أدخل الآن رقم الهاتف الذي قمت بالتحويل منه:</b>"
         )
     else:
         instruction = (
-            f"⚡ **طريقة الدفع: إنستاباي (InstaPay / كارت ميزة)**\n\n"
-            f"💵 **المبلغ المطلوب تحويله:** `{total_amount}` ج.م\n"
-            f"🏦 **عنوان إنستاباي (رقم الهاتف):** `{bot_config.INSTAPAY_ADDRESS}`\n"
-            f"*(اضغط على الرقم لنسخه فوراً في تطبيق InstaPay)*\n\n"
-            f"⚠️ **الخطوات المطلوبة:**\n"
-            f"1. قم بالتحويل عبر تطبيق إنستاباي للمبلغ المحدد إلى الرقم `{bot_config.INSTAPAY_ADDRESS}`.\n"
+            f"⚡ <b>طريقة الدفع: إنستاباي (InstaPay / كارت ميزة)</b>\n\n"
+            f"💵 <b>المبلغ المطلوب تحويله:</b> <code>{html.escape(str(total_amount))}</code> ج.م\n"
+            f"🏦 <b>عنوان إنستاباي (رقم الهاتف):</b> <code>{html.escape(str(bot_config.INSTAPAY_ADDRESS))}</code>\n"
+            f"<i>(اضغط على الرقم لنسخه فوراً في تطبيق InstaPay)</i>\n\n"
+            f"⚠️ <b>الخطوات المطلوبة:</b>\n"
+            f"1. قم بالتحويل عبر تطبيق إنستاباي للمبلغ المحدد إلى الرقم <code>{html.escape(str(bot_config.INSTAPAY_ADDRESS))}</code>.\n"
             f"2. التقط سكرين شوت (Screenshot) لإيصال نجاح المعاملة.\n\n"
-            f"👉 **أدخل الآن رقم هاتفك أو اسم حسابك في إنستاباي:**"
+            f"👉 <b>أدخل الآن رقم هاتفك أو اسم حسابك في إنستاباي:</b>"
         )
 
     is_admin = bot_config.is_admin(callback.from_user.id)
     if is_admin:
-        instruction += "\n\n👑 *للأدمن:* يمكنك الضغط على `تخطي ⏩` للمتابعة بدون رقم هاتف."
+        instruction += "\n\n👑 <i>للأدمن: يمكنك الضغط على <code>تخطي ⏩</code> للمتابعة بدون رقم هاتف.</i>"
     await state.set_state(PaymentStates.waiting_claimed_phone)
     await callback.message.answer(
         text=instruction,
         reply_markup=get_skip_keyboard() if is_admin else get_cancel_keyboard(),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
     await callback.answer()
 
@@ -87,12 +87,12 @@ async def process_claimed_phone(message: Message, state: FSMContext):
     await state.update_data(claimed_sender_phone=phone_input)
     await state.set_state(PaymentStates.waiting_receipt_photo)
 
-    skip_hint = "\n*(أو أرسل كلمة `تخطي` لإنشاء الطلب بدون صورة إيصال للأدمن)*" if is_admin else ""
+    skip_hint = "\n<i>(أو أرسل كلمة <code>تخطي</code> لإنشاء الطلب بدون صورة إيصال للأدمن)</i>" if is_admin else ""
     await message.answer(
-        "📸 **الخطوة الأخيرة:** يرجى إرسال **صورة الإيصال (Screenshot)** لعملية التحويل الآن:\n"
-        f"*(أرسل الصورة كصورة عادية داخل الشات)*{skip_hint}",
+        "📸 <b>الخطوة الأخيرة:</b> يرجى إرسال <b>صورة الإيصال (Screenshot)</b> لعملية التحويل الآن:\n"
+        f"<i>(أرسل الصورة كصورة عادية داخل الشات)</i>{skip_hint}",
         reply_markup=get_cancel_keyboard(),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 

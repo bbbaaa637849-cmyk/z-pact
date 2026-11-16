@@ -2,6 +2,7 @@
 # bot_service/handlers/support.py — خدمة العملاء والدعم الفني والربط المباشر
 # ================================================================
 
+import html
 import logging
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery
@@ -118,8 +119,8 @@ async def receive_user_inquiry(message: Message, state: FSMContext, bot: Bot):
     await state.clear()
 
     user = message.from_user
-    user_name = user.full_name or "غير معروف"
-    user_handle = f"@{user.username}" if user.username else "بدون يوزر"
+    user_name = html.escape(user.full_name or "غير معروف")
+    user_handle = f"@{html.escape(user.username)}" if user.username else "بدون يوزر"
     chat_id = str(message.chat.id)
 
     header = (
@@ -139,12 +140,12 @@ async def receive_user_inquiry(message: Message, state: FSMContext, bot: Bot):
             if message.text:
                 await bot.send_message(
                     chat_id=admin_id,
-                    text=f"{header}📝 <b>نص الرسالة:</b>\n{message.text}",
+                    text=f"{header}📝 <b>نص الرسالة:</b>\n{html.escape(message.text)}",
                     reply_markup=admin_kb,
                     parse_mode="HTML"
                 )
             elif message.photo:
-                caption = message.caption or "بدون تعليق"
+                caption = html.escape(message.caption or "بدون تعليق")
                 await bot.send_photo(
                     chat_id=admin_id,
                     photo=message.photo[-1].file_id,
