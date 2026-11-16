@@ -30,8 +30,12 @@ from bot_service.services.batch_parser import (
     build_excel_template_bytes,
     build_materials_catalog_excel_bytes,
     build_word_template_bytes,
+    filter_admin_materials,
     filter_usable_materials,
     match_material_by_ref,
+    normalize_arabic_text,
+    parse_coins_recharges_from_file,
+    parse_coins_recharges_from_text,
     parse_text_teacher_entries,
     parse_uploaded_batch_file,
 )
@@ -40,6 +44,7 @@ from bot_service.states.order_flow import (
     AdminBatchStampStates,
     AdminFontSettingsStates,
     AdminMaterialManageStates,
+    AdminMaterialRosterStates,
 )
 
 logger = logging.getLogger("bot_service.handlers.admin_studio")
@@ -47,6 +52,9 @@ router = Router(name="admin_studio_router")
 
 # قفل متسلسل لمنع تشغيل دفعتين في وقت واحد وحماية المعالج المحلي
 _BATCH_LOCK = asyncio.Lock()
+
+# ذاكرة مؤقتة لاختيار مدرسين محددين عند إعادة الختم لكل مشرف ومذكرة
+_ROSTER_SELECTIONS: Dict[tuple[int, int], set[int]] = {}
 
 TMP_UPLOAD_DIR = os.path.join(bot_config.STORAGE_DIR, "bot_tmp")
 os.makedirs(TMP_UPLOAD_DIR, exist_ok=True)
@@ -143,7 +151,7 @@ async def handle_send_materials_catalog_excel(event: Message | CallbackQuery):
         await event.answer("⏳ جاري تجهيز ملف Excel بالخامات والأسماء...")
 
     materials = await bridge_client.get_materials(include_unpublished=True)
-    usable = filter_usable_materials(materials)
+    usable = filter_admin_materials(materials)
     xlsx_bytes = build_materials_catalog_excel_bytes(usable)
 
     await target_msg.answer_document(
@@ -208,60 +216,167 @@ async def handle_batch_paste_start(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+def _inherit_first_row_material_metadata(entries: List[Dict[str, Any]]) -> None:
+    """
+    إذا عرّف أول سطر مذكرة مع وصفها أو سعرها وتركت الصفوف التالية عمود المذكرة فارغاً
+    (ملف حجوزات لمذكرة واحدة)، نربط تلك الصفوف الفارغة بها تلقائياً، ونمرر الوصف والسعر من أول صف فقط.
+    """
+    distinct_refs: List[str] = []
+    seen_norms: set[str] = set()
+    has_meta = False
+    for e in entries:
+        if any(e.get(k) is not None for k in ("material_description", "material_price", "material_price_coins", "material_tag")):
+            has_meta = True
+        ref = str(e.get("material_ref") or "").strip()
+        if ref:
+            nref = normalize_arabic_text(ref)
+            if nref and nref not in seen_norms:
+                seen_norms.add(nref)
+                distinct_refs.append(ref)
+
+    if len(distinct_refs) == 1 and has_meta:
+        sole_ref = distinct_refs[0]
+        for e in entries:
+            if not str(e.get("material_ref") or "").strip():
+                e["material_ref"] = sole_ref
+
+
 async def _prepare_and_show_batch_review(
     message: Message,
     state: FSMContext,
     raw_entries: List[Dict[str, Any]],
     source_label: str,
+    coin_recharges: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
-    if not raw_entries:
+    coin_rows = list(coin_recharges or [])
+    if not raw_entries and not coin_rows:
         await message.answer(
-            "⚠️ لم يتم العثور على صفوف مدرسين صالحة في الملف/النص.\n"
-            "تأكد من وجود أي بيان متاح للختم (الاسم، أو الهاتف، أو اسم المذكرة/السلسلة) أو حمّل القالب عبر /templates.\n"
+            "⚠️ لم يتم العثور على صفوف مدرسين أو طلبات شحن كوينز صالحة في الملف/النص.\n"
+            "تأكد من وجود أي بيان متاح للختم (الاسم، أو الهاتف، أو اسم المذكرة/السلسلة) أو عمود شحن الكوينز، أو حمّل القالب عبر /templates.\n"
             "💡 للأدمن: كل حقول البيانات اختيارية.",
             parse_mode="HTML",
         )
         return
 
     materials = await bridge_client.get_materials(include_unpublished=True)
+    admin_mats = filter_admin_materials(materials)
     matched_entries: List[Dict[str, Any]] = []
-    ready_count = 0
-    need_default_count = 0
+    material_specs: Dict[str, Dict[str, Any]] = {}
     is_admin = _is_admin(message.from_user.id)
 
-    for idx, item in enumerate(raw_entries, start=1):
+    working_rows = [dict(x) for x in raw_entries]
+    _inherit_first_row_material_metadata(working_rows)
+
+    for idx, item in enumerate(working_rows, start=1):
         entry = dict(item)
         entry["idx"] = idx
-        # للأدمن لا يوجد أي عنصر يعتبر "بيانات ناقصة" نهائياً
         if is_admin:
             entry.pop("_incomplete", None)
-        mat, method = match_material_by_ref(entry.get("material_ref"), materials)
+
+        mat, method = match_material_by_ref(entry.get("material_ref"), admin_mats)
         if not mat and not entry.get("material_ref") and entry.get("series_name"):
-            cand_mat, cand_method = match_material_by_ref(entry.get("series_name"), materials)
+            cand_mat, cand_method = match_material_by_ref(entry.get("series_name"), admin_mats)
             if cand_mat and cand_method in ("exact_id", "exact_title", "partial_title"):
                 mat, method = cand_mat, cand_method
+
+        spec_key: Optional[str] = None
         if mat:
-            entry["matched_material_id"] = mat["id"]
+            mid = int(mat["id"])
+            entry["matched_material_id"] = mid
             entry["matched_material_title"] = mat["title"]
             entry["match_method"] = method
-            entry["status_tag"] = "ready"
-            ready_count += 1
+            entry["mat_is_coming_soon"] = bool(mat.get("is_coming_soon", False))
+            entry["mat_layout_confirmed"] = bool(mat.get("layout_confirmed", True))
+            entry["mat_has_pdf"] = bool(mat.get("has_pdf", mat.get("file_exists", True)))
+            spec_key = f"mat:{mid}"
+            if entry["mat_has_pdf"] and entry["mat_layout_confirmed"]:
+                entry["status_tag"] = "ready"
+            else:
+                entry["status_tag"] = "waitlist_existing"
+            if spec_key not in material_specs:
+                material_specs[spec_key] = {
+                    "key": spec_key,
+                    "is_new": False,
+                    "material_id": mid,
+                    "title": mat["title"],
+                    "description": None,
+                    "price": None,
+                    "price_coins": None,
+                    "tag": None,
+                    "platform_price": mat.get("price"),
+                    "platform_coins": mat.get("price_coins"),
+                    "is_coming_soon": entry["mat_is_coming_soon"],
+                    "layout_confirmed": entry["mat_layout_confirmed"],
+                    "has_pdf": entry["mat_has_pdf"],
+                    "teachers_count": 0,
+                }
+        elif str(entry.get("material_ref") or "").strip():
+            raw_title = str(entry["material_ref"]).strip()
+            norm_k = normalize_arabic_text(raw_title) or raw_title.lower()
+            spec_key = f"new:{norm_k}"
+            entry["matched_material_id"] = None
+            entry["matched_material_title"] = raw_title
+            entry["upcoming_key"] = spec_key
+            entry["status_tag"] = "waitlist_new_upcoming"
+            if spec_key not in material_specs:
+                material_specs[spec_key] = {
+                    "key": spec_key,
+                    "is_new": True,
+                    "material_id": None,
+                    "title": raw_title,
+                    "description": None,
+                    "price": None,
+                    "price_coins": None,
+                    "tag": None,
+                    "platform_price": None,
+                    "platform_coins": None,
+                    "is_coming_soon": True,
+                    "layout_confirmed": False,
+                    "has_pdf": False,
+                    "teachers_count": 0,
+                }
         else:
             entry["matched_material_id"] = None
             entry["matched_material_title"] = None
             entry["status_tag"] = "need_material"
-            need_default_count += 1
+
+        # التقاط الوصف/السعر/التصنيف من أول مدرس يوفرها لهذه المذكرة (داتا لمرة واحدة)
+        if spec_key and spec_key in material_specs:
+            sp = material_specs[spec_key]
+            sp["teachers_count"] += 1
+            if sp["description"] is None and entry.get("material_description"):
+                sp["description"] = str(entry["material_description"]).strip()
+            if sp["price"] is None and entry.get("material_price") is not None:
+                sp["price"] = float(entry["material_price"])
+            if sp["price_coins"] is None and entry.get("material_price_coins") is not None:
+                sp["price_coins"] = float(entry["material_price_coins"])
+            if sp["tag"] is None and entry.get("material_tag"):
+                sp["tag"] = str(entry["material_tag"]).strip()
+
         matched_entries.append(entry)
 
-    default_mat_id = materials[0]["id"] if (len(materials) == 1 and need_default_count > 0) else None
-    default_mat_title = materials[0]["title"] if default_mat_id is not None else None
+    need_default_count = sum(1 for e in matched_entries if e.get("status_tag") == "need_material")
+    default_mat_id = admin_mats[0]["id"] if (len(admin_mats) == 1 and need_default_count > 0) else None
+    default_mat_title = admin_mats[0]["title"] if default_mat_id is not None else None
+    default_mat_obj = admin_mats[0] if default_mat_id is not None else None
+
+    coin_preview = None
+    if coin_rows:
+        coin_preview = await bridge_client.preview_batch_coins(coin_rows)
 
     await state.set_state(AdminBatchStampStates.reviewing_batch)
     await state.update_data(
         batch_entries=matched_entries,
+        batch_material_specs=material_specs,
+        batch_coins_preview=coin_preview,
         batch_source=source_label,
         batch_default_mat_id=default_mat_id,
         batch_default_mat_title=default_mat_title,
+        batch_default_mat_ready=bool(
+            default_mat_obj
+            and bool(default_mat_obj.get("has_pdf", default_mat_obj.get("file_exists", True)))
+            and bool(default_mat_obj.get("layout_confirmed", True))
+        ) if default_mat_obj else False,
         batch_font_family=None,
         batch_override_frame_path=None,
     )
@@ -271,13 +386,17 @@ async def _prepare_and_show_batch_review(
 
 def _render_batch_summary_text_and_kb(state_data: Dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
     entries = state_data.get("batch_entries", [])
+    specs = state_data.get("batch_material_specs", {}) or {}
+    coin_preview = state_data.get("batch_coins_preview")
     source = state_data.get("batch_source", "دفعة")
     def_id = state_data.get("batch_default_mat_id")
     def_title = state_data.get("batch_default_mat_title")
+    def_ready = state_data.get("batch_default_mat_ready", True)
     font_fam = state_data.get("batch_font_family")
     frame_path = state_data.get("batch_override_frame_path")
 
-    runnable = 0
+    runnable_ready = 0
+    waitlist_count = 0
     missing_mat = 0
     pending_logos = [
         e for e in entries
@@ -302,75 +421,136 @@ def _render_batch_summary_text_and_kb(state_data: Dict[str, Any]) -> tuple[str, 
         else:
             wm_lbl = ""
 
-        if e.get("matched_material_id"):
-            runnable += 1
-            lines.append(f"🟢 #{e['idx']} {name} (<code>{phone}</code>){series_lbl}{wm_lbl} ⬅️ <i>{html.escape(e['matched_material_title'])}</i>")
+        st = e.get("status_tag")
+        if st == "ready" or (e.get("matched_material_id") and st is None):
+            runnable_ready += 1
+            lines.append(f"🟢 #{e['idx']} {name} (<code>{phone}</code>){series_lbl}{wm_lbl} ⬅️ <i>{html.escape(str(e.get('matched_material_title') or ''))}</i>")
+        elif st == "waitlist_existing":
+            waitlist_count += 1
+            why = "بانتظار PDF" if not e.get("mat_has_pdf", True) else "بانتظار الأختام"
+            lines.append(f"⏳ #{e['idx']} {name} (<code>{phone}</code>){series_lbl}{wm_lbl} ⬅️ <i>{html.escape(str(e.get('matched_material_title') or ''))} ({why})</i>")
+        elif st == "waitlist_new_upcoming":
+            waitlist_count += 1
+            lines.append(f"✨ #{e['idx']} {name} (<code>{phone}</code>){series_lbl}{wm_lbl} ⬅️ <i>{html.escape(str(e.get('matched_material_title') or ''))} (تشويق قريباً)</i>")
         elif def_id:
-            runnable += 1
-            lines.append(f"🟡 #{e['idx']} {name} (<code>{phone}</code>){series_lbl}{wm_lbl} ⬅️ <i>{html.escape(str(def_title))} (افتراضي)</i>")
+            if def_ready:
+                runnable_ready += 1
+                lines.append(f"🟡 #{e['idx']} {name} (<code>{phone}</code>){series_lbl}{wm_lbl} ⬅️ <i>{html.escape(str(def_title))} (افتراضي)</i>")
+            else:
+                waitlist_count += 1
+                lines.append(f"⏳ #{e['idx']} {name} (<code>{phone}</code>){series_lbl}{wm_lbl} ⬅️ <i>{html.escape(str(def_title))} (انتظار الجاهزية)</i>")
         else:
             missing_mat += 1
             ref = html.escape(str(e.get("material_ref") or "غير محددة"))
             lines.append(f"⚠️ #{e['idx']} {name} (<code>{phone}</code>){series_lbl}{wm_lbl} — اختر مذكرة افتراضية: <code>{ref}</code>")
 
-    # حساب البقية بعد 15
     for e in entries[15:]:
-        if e.get("matched_material_id") or def_id:
-            runnable += 1
+        st = e.get("status_tag")
+        if st == "ready" or (e.get("matched_material_id") and st is None):
+            runnable_ready += 1
+        elif st in ("waitlist_existing", "waitlist_new_upcoming"):
+            waitlist_count += 1
+        elif def_id:
+            if def_ready:
+                runnable_ready += 1
+            else:
+                waitlist_count += 1
         else:
             missing_mat += 1
 
     if len(entries) > 15:
         lines.append(f"<i>... و {len(entries) - 15} مدرس إضافي في نفس الدفعة</i>")
 
-    lines.extend([
-        "",
-        f"📊 <b>الملخص:</b> جاهز للتنفيذ: <code>{runnable}</code> | يحتاج مذكرة افتراضية: <code>{missing_mat}</code>",
-        f"🔤 <b>الخط الموحد:</b> <code>{font_fam or 'خط كل مذكرة المحفوظ'}</code>",
-        f"🖼️ <b>إطار مخصص للدفعة:</b> <code>{'مُرفق ✅' if frame_path else 'إطار كل مذكرة الافتراضي'}</code>",
-    ])
+    # عرض ملخص المذكرات القادمة / بيانات التشويق الملتقطة لمرة واحدة
+    upcoming_specs = [
+        sp for sp in specs.values()
+        if sp.get("is_new") or not sp.get("has_pdf", True) or not sp.get("layout_confirmed", True)
+    ]
+    if upcoming_specs:
+        lines.append("\n📦 <b>مذكرات قيد الانتظار / تشويق على الموقع:</b>")
+        for sp in upcoming_specs[:6]:
+            tag_new = "✨ جديدة (تشويق قريباً)" if sp.get("is_new") else ("⏳ بدون PDF بعد" if not sp.get("has_pdf") else "🟡 بدون تأكيد الأختام بعد")
+            price_txt = (
+                f"{sp['price']} ج.م" if sp.get("price") is not None
+                else (f"{sp['price_coins']} كوينز" if sp.get("price_coins") is not None else "سعر المنصة الطبيعي")
+            )
+            desc_preview = f" | 📝 {html.escape(sp['description'][:45])}" if sp.get("description") else ""
+            lines.append(
+                f"• <b>{html.escape(sp['title'])}</b> [{tag_new}] — 💰 {price_txt} — 👥 {sp.get('teachers_count', 0)} مدرس{desc_preview}"
+            )
+
+    if entries:
+        wl_part = f" | قائمة الانتظار (قريباً): <code>{waitlist_count}</code>" if waitlist_count > 0 else ""
+        lines.extend([
+            "",
+            f"📊 <b>الملخص:</b> جاهز للتنفيذ: <code>{runnable_ready}</code>{wl_part} | يحتاج مذكرة افتراضية: <code>{missing_mat}</code>",
+            f"🔤 <b>الخط الموحد:</b> <code>{font_fam or 'خط كل مذكرة المحفوظ'}</code>",
+            f"🖼️ <b>إطار مخصص للدفعة:</b> <code>{'مُرفق ✅' if frame_path else 'إطار كل مذكرة الافتراضي'}</code>",
+        ])
+
+    if coin_preview:
+        m_cnt = int(coin_preview.get("matched_count") or 0)
+        u_cnt = int(coin_preview.get("unmatched_count") or 0)
+        t_coins = coin_preview.get("total_coins") or 0
+        lines.append(
+            f"\n💰 <b>طلبات شحن الكوينز المكتشفة:</b> مطابقة <code>{m_cnt}</code> حساب بإجمالي <code>+{t_coins}</code> كوينز (غير مطابق: <code>{u_cnt}</code>)"
+        )
+        for cm in (coin_preview.get("matched") or [])[:5]:
+            lines.append(
+                f"  • {html.escape(str(cm.get('full_name') or cm.get('email') or cm.get('phone') or ''))}: "
+                f"<code>{cm.get('current_coins', 0)}</code> ⬅️ <code>{cm.get('new_coins', 0)}</code> (+{cm.get('add_coins')})"
+            )
 
     if ready_logos:
         lines.append(f"🖼️ <b>صور لوجو جاهزة:</b> <code>{len(ready_logos)}</code> مدرس")
 
-    if pending_logos:
+    if entries and pending_logos:
         lines.append(
             f"\n🖼️ <b>مطلوب صور اللوجو:</b> يوجد <code>{len(pending_logos)}</code> مدرس في الملف يريدون علامة مائية بصورة لوجو — "
             "اضغط <b>🖼️ إرسال صور اللوجو المطلوبة</b> بالأسفل لإرسال صورهم:"
         )
-    else:
+    elif entries:
         lines.append(
             "\n🖼️ <b>هل يوجد مدرس عنده صورة لوجو؟</b> لو في حد من المدرسين عاوز علامة مائية بصورة لوجو، "
             "اضغط <b>🖼️ إرفاق لوجو لمدرس</b> وابعت الصورة وهنربطها بيه فوراً."
         )
 
-    lines.extend([
-        "",
-        "💡 اضغط <b>ابدأ الختم المتسلسل</b> ليتم ختم وإرسال المذكرات واحدة تلو الأخرى بأمان على المعالج:",
-    ])
-
     kb_rows = []
-    if runnable > 0:
+    total_actionable = runnable_ready + waitlist_count
+    if total_actionable > 0:
+        if waitlist_count > 0 and runnable_ready > 0:
+            run_label = f"🚀 تنفيذ الآن ({runnable_ready} فوري + {waitlist_count} انتظار)"
+        elif waitlist_count > 0:
+            run_label = f"⏳ نشر التشويق وحفظ الانتظار ({waitlist_count} مدرس)"
+        else:
+            run_label = f"🚀 ابدأ الختم المتسلسل الآن ({runnable_ready} ملف)"
+        kb_rows.append([InlineKeyboardButton(text=run_label, callback_data="adm_batch:run")])
+
+    if coin_preview and int(coin_preview.get("matched_count") or 0) > 0:
         kb_rows.append([InlineKeyboardButton(
-            text=f"🚀 ابدأ الختم المتسلسل الآن ({runnable} ملف)",
-            callback_data="adm_batch:run",
+            text=f"💰 شحن الكوينز الآن ({coin_preview['matched_count']} حساب | +{coin_preview['total_coins']})",
+            callback_data="adm_batch:run_coins",
         )])
+
     if pending_logos:
         kb_rows.append([InlineKeyboardButton(
             text=f"🖼️ إرسال صور اللوجو المطلوبة ({len(pending_logos)})",
             callback_data="adm_batch:collect_logos",
         )])
-    kb_rows.append([
-        InlineKeyboardButton(text="🖼️ إرفاق لوجو لمدرس / للدفعة", callback_data="adm_batch:pick_logo_teacher"),
-    ])
-    kb_rows.append([
-        InlineKeyboardButton(text="📚 تعيين مذكرة افتراضية", callback_data="adm_batch:pick_default_mat"),
-        InlineKeyboardButton(text="🔤 تغيير الخط للدفعة", callback_data="adm_batch:pick_font"),
-    ])
-    kb_rows.append([
-        InlineKeyboardButton(text="🖼️ إرفاق إطار للدفعة", callback_data="adm_batch:attach_frame"),
-        InlineKeyboardButton(text="❌ إلغاء الدفعة", callback_data="adm_batch:cancel"),
-    ])
+    if entries:
+        kb_rows.append([
+            InlineKeyboardButton(text="🖼️ إرفاق لوجو لمدرس / للدفعة", callback_data="adm_batch:pick_logo_teacher"),
+        ])
+        kb_rows.append([
+            InlineKeyboardButton(text="📚 تعيين مذكرة افتراضية", callback_data="adm_batch:pick_default_mat"),
+            InlineKeyboardButton(text="🔤 تغيير الخط للدفعة", callback_data="adm_batch:pick_font"),
+        ])
+        kb_rows.append([
+            InlineKeyboardButton(text="🖼️ إرفاق إطار للدفعة", callback_data="adm_batch:attach_frame"),
+            InlineKeyboardButton(text="❌ إلغاء الدفعة", callback_data="adm_batch:cancel"),
+        ])
+    else:
+        kb_rows.append([InlineKeyboardButton(text="❌ إلغاء الدفعة", callback_data="adm_batch:cancel")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
 
@@ -438,7 +618,15 @@ async def handle_idle_admin_batch_document(message: Message, state: FSMContext):
             file_bytes,
             is_admin=_is_admin(message.from_user.id),
         )
-        await _prepare_and_show_batch_review(message, state, entries, label)
+        coin_recharges = parse_coins_recharges_from_file(
+            doc.file_name or "batch.xlsx",
+            file_bytes,
+            is_admin=_is_admin(message.from_user.id),
+        )
+        if coin_recharges:
+            await _prepare_and_show_batch_review(message, state, entries, label, coin_recharges=coin_recharges)
+        else:
+            await _prepare_and_show_batch_review(message, state, entries, label)
         await _safe_delete_message(wait_msg)
     except Exception as e:
         logger.exception(f"❌ [Batch Document] تعذر قراءة أو تجهيز الملف: {e}")
@@ -465,8 +653,13 @@ async def handle_idle_admin_frame_photo(message: Message, state: FSMContext):
 async def process_batch_pasted_text(message: Message, state: FSMContext):
     if not await check_admin_perm(message, bot_config, "batch_vip", state=state):
         return
-    entries = parse_text_teacher_entries(message.text or "", is_admin=True)
-    await _prepare_and_show_batch_review(message, state, entries, "قائمة نصية")
+    raw_txt = message.text or ""
+    entries = parse_text_teacher_entries(raw_txt, is_admin=True)
+    coin_recharges = parse_coins_recharges_from_text(raw_txt)
+    if coin_recharges:
+        await _prepare_and_show_batch_review(message, state, entries, "قائمة نصية", coin_recharges=coin_recharges)
+    else:
+        await _prepare_and_show_batch_review(message, state, entries, "قائمة نصية")
 
 
 @router.callback_query(F.data == "adm_batch:cancel")
@@ -479,13 +672,13 @@ async def handle_batch_cancel(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "adm_batch:pick_default_mat", AdminBatchStampStates.reviewing_batch)
 async def handle_batch_pick_default_mat(callback: CallbackQuery):
     materials = await bridge_client.get_materials(include_unpublished=True)
-    usable = filter_usable_materials(materials)
+    usable = filter_admin_materials(materials)
     if not usable:
         await callback.answer("لا توجد مذكرات", show_alert=True)
         return
     rows = [
         [InlineKeyboardButton(
-            text=f"📖 {m['title']} (#{m['id']})",
+            text=f"{'⏳ ' if m.get('is_coming_soon') else '📖 '}{m['title']} (#{m['id']})",
             callback_data=f"adm_batch_setmat:{m['id']}"
         )]
         for m in usable[:45]
@@ -504,7 +697,12 @@ async def handle_batch_set_default_mat(callback: CallbackQuery, state: FSMContex
     materials = await bridge_client.get_materials(include_unpublished=True)
     mat = next((m for m in materials if int(m["id"]) == mat_id), None)
     if mat:
-        await state.update_data(batch_default_mat_id=mat["id"], batch_default_mat_title=mat["title"])
+        is_ready = bool(mat.get("has_pdf", mat.get("file_exists", True))) and bool(mat.get("layout_confirmed", True))
+        await state.update_data(
+            batch_default_mat_id=mat["id"],
+            batch_default_mat_title=mat["title"],
+            batch_default_mat_ready=is_ready,
+        )
     await callback.answer("تم تحديد المذكرة الافتراضية ✅")
     await _send_batch_summary_card(callback.message, await state.get_data())
 
@@ -762,6 +960,254 @@ async def handle_batch_frame_received(message: Message, state: FSMContext):
     await _send_batch_summary_card(message, await state.get_data())
 
 
+async def execute_stamp_items_sequential(
+    bot: Bot,
+    chat_id: int,
+    user_id: int,
+    runnable: List[Dict[str, Any]],
+    batch_font: Optional[str] = None,
+    batch_frame: Optional[str] = None,
+    initial_skipped: Optional[List[str]] = None,
+    header_label: str = "الدفعة التسلسلية",
+) -> None:
+    """تنفيذ متسلسل آمن للختم والإرسال عبر التيليجرام (مشترك للدفعات وقوائم الانتظار وإعادة الختم)."""
+    async with _BATCH_LOCK:
+        total = len(runnable)
+        ok_count = 0
+        fail_lines = list(initial_skipped or [])
+        progress_msg = await bot.send_message(
+            chat_id=chat_id,
+            text=f"⏳ <b>بدء معالجة {html.escape(header_label)} بهدوء (0 / {total})</b> — ملف واحد كل مرة لحماية المعالج...",
+            parse_mode="HTML",
+        )
+
+        for pos, item in enumerate(runnable, start=1):
+            tname = str(item.get("teacher_name") or "").strip()
+            tphone = str(item.get("phone") or "").strip()
+            tseries = str(item.get("series_name") or "").strip()
+            disp_name = tname or tseries or tphone or "بدون اسم"
+            disp_phone = tphone or "بدون رقم"
+            entry_id = item.get("teacher_entry_id")
+
+            try:
+                await progress_msg.edit_text(
+                    f"⚙️ <b>جاري المعالجة ({pos} / {total})...</b>\n"
+                    f"👤 المدرس: {html.escape(disp_name)} (<code>{html.escape(disp_phone)}</code>)\n"
+                    f"✅ مكتمل حتى الآن: <code>{ok_count}</code>",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+
+            item_wm_logo = item.get("watermark_logo_path")
+            item_wm_type = str(item.get("watermark_type") or "").strip().lower()
+            if item_wm_type == "logo" and not item_wm_logo:
+                item_wm_type = "none"
+            elif item_wm_logo:
+                item_wm_type = "logo"
+            elif not item_wm_type:
+                item_wm_type = "text" if item.get("watermark_text") else "none"
+
+            payload = {
+                "material_id": int(item["final_material_id"]),
+                "buyer_name_stamp": tname,
+                "buyer_phone_stamp": tphone,
+                "buyer_phone_stamp_2": item.get("phone_2"),
+                "series_name": item.get("series_name"),
+                "doc_name_stamp": item.get("series_name"),
+                "watermark_text": None if item_wm_type == "logo" else item.get("watermark_text"),
+                "watermark_type": item_wm_type,
+                "watermark_logo_path": item_wm_logo,
+                "font_family": item.get("font_family") or batch_font,
+                "font_size": item.get("font_size"),
+                "override_frame_path": item.get("override_frame_path") or batch_frame,
+                "telegram_chat_id": str(chat_id),
+                "telegram_user_id": str(user_id),
+                "is_admin": bot_config.is_admin(int(user_id)) if str(user_id).isdigit() else True,
+            }
+            if entry_id:
+                payload["teacher_entry_id"] = int(entry_id)
+
+            res = await bridge_client.direct_stamp_sync(payload)
+            if not res.get("ok"):
+                err_txt = str(res.get("error") or "خطأ غير معروف")
+                fail_lines.append(f"#{item.get('idx', pos)} {disp_name}: {err_txt}")
+                if entry_id:
+                    await bridge_client.mark_teacher_entry(int(entry_id), "failed", error_message=err_txt)
+                await asyncio.sleep(0.3)
+                continue
+
+            info = res["data"]
+            order_code = info.get("order_code")
+            pdf_bytes = await bridge_client.download_order_pdf(order_code)
+            if not pdf_bytes:
+                fail_lines.append(f"#{item.get('idx', pos)} {disp_name}: تعذر تنزيل الـ PDF")
+                if entry_id:
+                    await bridge_client.mark_teacher_entry(int(entry_id), "failed", error_message="تعذر تنزيل الملف")
+                await asyncio.sleep(0.3)
+                continue
+
+            mat_title = info.get("material_title", "booklet")
+            safe_name = f"{_safe_filename_part(tname or tseries or tphone or 'stamp')}_{_safe_filename_part(mat_title)}_{order_code}.pdf"
+            try:
+                await bot.send_document(
+                    chat_id=chat_id,
+                    document=BufferedInputFile(pdf_bytes, filename=safe_name),
+                    caption=(
+                        f"✅ <b>[{pos}/{total}] {html.escape(str(mat_title))}</b>\n"
+                        f"👤 {html.escape(disp_name)} | 📱 <code>{html.escape(disp_phone)}</code>\n"
+                        f"🔖 <code>{html.escape(str(order_code))}</code> ({info.get('file_size_kb', 0)} KB)"
+                    ),
+                    parse_mode="HTML",
+                )
+                ok_count += 1
+                await bridge_client.cleanup_order_pdf(order_code)
+            except Exception as send_err:
+                fail_lines.append(f"#{item.get('idx', pos)} {disp_name}: خطأ إرسال ({send_err})")
+            finally:
+                del pdf_bytes
+                gc.collect()
+
+            await asyncio.sleep(0.5)
+
+        summary = [
+            f"🎉 <b>اكتملت معالجة {html.escape(header_label)} بنجاح!</b>",
+            "━━━━━━━━━━━━━━━━━━",
+            f"✅ ملفات مرسلة بنجاح: <code>{ok_count}</code> من <code>{total}</code>",
+            f"⚠️ متخطى / أخطاء: <code>{len(fail_lines)}</code>",
+        ]
+        if fail_lines:
+            summary.append("\n<b>تفاصيل الملاحظات:</b>")
+            for fl in fail_lines[:10]:
+                summary.append(f"• {html.escape(str(fl))}")
+        try:
+            await progress_msg.edit_text("\n".join(summary), parse_mode="HTML")
+        except Exception:
+            await bot.send_message(chat_id=chat_id, text="\n".join(summary), parse_mode="HTML")
+
+
+async def run_material_waitlist_release(bot: Bot, material_id: int, fallback_chat_id: Optional[int] = None) -> int:
+    """إطلاق تلقائي لقائمة انتظار مذكرة فور تحقق الشرطين (PDF + تأكيد الأختام)."""
+    res = await bridge_client.get_material_teacher_entries(material_id, status="waiting_release")
+    if not res:
+        return 0
+    mat = res.get("material") or {}
+    if not mat.get("has_pdf") or not mat.get("layout_confirmed"):
+        return 0
+    entries = res.get("entries") or []
+    if not entries:
+        return 0
+
+    default_admin_id = fallback_chat_id or bot_config.OWNER_ID or (bot_config.ADMIN_IDS[0] if bot_config.ADMIN_IDS else None)
+    by_chat: Dict[int, List[Dict[str, Any]]] = {}
+    for idx, e in enumerate(entries, start=1):
+        raw_chat = e.get("telegram_chat_id")
+        tgt_chat = int(raw_chat) if (raw_chat and str(raw_chat).isdigit()) else default_admin_id
+        if not tgt_chat:
+            continue
+        item = dict(e)
+        item["idx"] = idx
+        item["final_material_id"] = material_id
+        item["teacher_entry_id"] = e["id"]
+        by_chat.setdefault(tgt_chat, []).append(item)
+
+    sent_total = 0
+    for chat_id, items in by_chat.items():
+        await execute_stamp_items_sequential(
+            bot=bot,
+            chat_id=chat_id,
+            user_id=chat_id,
+            runnable=items,
+            header_label=f"قائمة انتظار: {mat.get('title', f'#{material_id}')}",
+        )
+        sent_total += len(items)
+    return sent_total
+
+
+async def run_material_restamp(
+    bot: Bot,
+    chat_id: int,
+    user_id: int,
+    material_id: int,
+    entry_ids: Optional[List[int]] = None,
+) -> int:
+    """إعادة ختم وإرسال المدرسين المحفوظين في سجل المذكرة (الكل أو محددين) بالتنسيق الجديد."""
+    res = await bridge_client.get_material_teacher_entries(material_id)
+    if not res:
+        await bot.send_message(chat_id, "⚠️ تعذر تحميل سجل المدرسين لهذه المذكرة.")
+        return 0
+    mat = res.get("material") or {}
+    if not mat.get("has_pdf"):
+        await bot.send_message(chat_id, "⏳ هذه المذكرة لم يُرفع لها ملف PDF بعد.")
+        return 0
+    all_entries = res.get("entries") or []
+    if entry_ids is not None:
+        wanted = {int(x) for x in entry_ids}
+        selected = [e for e in all_entries if int(e["id"]) in wanted]
+    else:
+        selected = [e for e in all_entries if e.get("status") in ("completed", "waiting_release", "failed")]
+
+    if not selected:
+        await bot.send_message(chat_id, "⚠️ لا يوجد مدرسون محددون لإعادة الختم.")
+        return 0
+
+    runnable = []
+    for idx, e in enumerate(selected, start=1):
+        item = dict(e)
+        item["idx"] = idx
+        item["final_material_id"] = material_id
+        item["teacher_entry_id"] = e["id"]
+        runnable.append(item)
+
+    await execute_stamp_items_sequential(
+        bot=bot,
+        chat_id=chat_id,
+        user_id=user_id,
+        runnable=runnable,
+        header_label=f"إعادة ختم: {mat.get('title', f'#{material_id}')}",
+    )
+    return len(runnable)
+
+
+@router.callback_query(F.data == "adm_batch:run_coins", AdminBatchStampStates.reviewing_batch)
+async def handle_batch_coins_execute(callback: CallbackQuery, state: FSMContext):
+    if not await check_admin_perm(callback, bot_config, "batch_vip"):
+        return
+
+    data = await state.get_data()
+    coin_preview = data.get("batch_coins_preview") or {}
+    matched = coin_preview.get("matched") or []
+    if not matched:
+        await callback.answer("لا توجد حسابات مطابقة لشحن الكوينز", show_alert=True)
+        return
+
+    await callback.answer("⏳ جاري شحن الكوينز للمستخدمين...")
+    apply_res = await bridge_client.apply_batch_coins(matched)
+    if not apply_res:
+        await callback.message.answer("⚠️ تعذر تنفيذ شحن الكوينز على السيرفر.")
+        return
+
+    credited = apply_res.get("credited") or []
+    errors = apply_res.get("errors") or []
+    lines = [
+        "💰 <b>تم تنفيذ شحن الكوينز من ملف Excel بنجاح!</b>",
+        "━━━━━━━━━━━━━━━━━━",
+        f"✅ حسابات تم شحنها: <code>{len(credited)}</code> | ❌ أخطاء: <code>{len(errors)}</code>",
+    ]
+    for c in credited[:15]:
+        nm = html.escape(str(c.get("full_name") or c.get("email") or c.get("phone") or ""))
+        lines.append(f"• {nm}: <code>+{c.get('added')}</code> ⬅️ الرصيد الجديد <code>{c.get('new_balance')}</code>")
+
+    await callback.message.answer("\n".join(lines), parse_mode="HTML")
+
+    has_stamps = bool(data.get("batch_entries"))
+    if has_stamps:
+        await state.update_data(batch_coins_preview=None)
+        await _send_batch_summary_card(callback.message, await state.get_data())
+    else:
+        await state.clear()
+
+
 @router.callback_query(F.data == "adm_batch:run", AdminBatchStampStates.reviewing_batch)
 async def handle_batch_execute_sequential(callback: CallbackQuery, state: FSMContext):
     if not await check_admin_perm(callback, bot_config, "batch_vip"):
@@ -771,139 +1217,139 @@ async def handle_batch_execute_sequential(callback: CallbackQuery, state: FSMCon
     await state.clear()
 
     entries = data.get("batch_entries", [])
+    specs = data.get("batch_material_specs", {}) or {}
     def_mat_id = data.get("batch_default_mat_id")
+    def_mat_ready = data.get("batch_default_mat_ready", True)
     batch_font = data.get("batch_font_family")
     batch_frame = data.get("batch_override_frame_path")
-
-    runnable = []
-    skipped = []
-    for e in entries:
-        mid = e.get("matched_material_id") or def_mat_id
-        if not mid:
-            skipped.append(f"#{e.get('idx')} ({e.get('teacher_name') or e.get('series_name') or e.get('phone') or '?'}) — لم تُحدد المذكرة")
-            continue
-        item = dict(e)
-        item["final_material_id"] = int(mid)
-        runnable.append(item)
-
-    if not runnable:
-        await callback.message.answer("⚠️ لا توجد عناصر جاهزة للتشغيل في هذه الدفعة.")
-        await callback.answer()
-        return
-
-    await callback.answer("🚀 تم بدء الدفعة المتسلسلة!")
     chat_id = callback.message.chat.id
     user_id = callback.from_user.id
     bot = callback.bot
 
-    async def _run_queue():
-        async with _BATCH_LOCK:
-            total = len(runnable)
-            ok_count = 0
-            fail_lines = list(skipped)
-            progress_msg = await bot.send_message(
-                chat_id=chat_id,
-                text=f"⏳ <b>بدء معالجة الدفعة بهدوء (0 / {total})</b> — ملف واحد كل مرة لحماية المعالج...",
-                parse_mode="HTML",
+    # 1. إنشاء/تحديث المذكرات القادمة (تشويق) أو المذكرات التي أُدخل وصفها/سعرها من أول مدرس
+    resolved_new_ids: Dict[str, Dict[str, Any]] = {}
+    for skey, sp in specs.items():
+        should_upsert = sp.get("is_new") or sp.get("description") or (sp.get("price") is not None) or (sp.get("price_coins") is not None) or sp.get("tag")
+        if should_upsert:
+            up_res = await bridge_client.upsert_upcoming_material({
+                "title": sp["title"],
+                "description": sp.get("description"),
+                "tag": sp.get("tag"),
+                "price": sp.get("price"),
+                "price_coins": sp.get("price_coins"),
+                "is_published": True,
+            })
+            if up_res and up_res.get("material"):
+                resolved_new_ids[skey] = up_res["material"]
+
+    runnable: List[Dict[str, Any]] = []
+    waitlist_by_mat: Dict[int, List[Dict[str, Any]]] = {}
+    mat_info_cache: Dict[int, Dict[str, Any]] = {}
+    skipped: List[str] = []
+
+    for e in entries:
+        item = dict(e)
+        st = item.get("status_tag")
+        mid = item.get("matched_material_id")
+        is_ready_mat = False
+
+        if st == "waitlist_new_upcoming":
+            uk = item.get("upcoming_key")
+            mobj = resolved_new_ids.get(uk)
+            if not mobj:
+                skipped.append(f"#{item.get('idx')} ({_batch_entry_label(item)}) — تعذر تسجيل المذكرة القادمة")
+                continue
+            mid = int(mobj["id"])
+            mat_info_cache[mid] = mobj
+            is_ready_mat = bool(mobj.get("has_pdf") and mobj.get("layout_confirmed"))
+        elif mid:
+            mid = int(mid)
+            sp = specs.get(f"mat:{mid}", {})
+            mobj = resolved_new_ids.get(f"mat:{mid}") or {
+                "id": mid,
+                "title": item.get("matched_material_title"),
+                "has_pdf": item.get("mat_has_pdf", sp.get("has_pdf", True)),
+                "layout_confirmed": item.get("mat_layout_confirmed", sp.get("layout_confirmed", True)),
+                "is_coming_soon": item.get("mat_is_coming_soon", sp.get("is_coming_soon", False)),
+            }
+            mat_info_cache[mid] = mobj
+            is_ready_mat = bool(mobj.get("has_pdf") and mobj.get("layout_confirmed"))
+        elif def_mat_id:
+            mid = int(def_mat_id)
+            is_ready_mat = bool(def_mat_ready)
+            mat_info_cache.setdefault(mid, {"id": mid, "title": data.get("batch_default_mat_title") or f"#{mid}", "has_pdf": is_ready_mat, "layout_confirmed": is_ready_mat})
+        else:
+            skipped.append(f"#{item.get('idx')} ({_batch_entry_label(item)}) — لم تُحدد المذكرة")
+            continue
+
+        if batch_font and not item.get("font_family"):
+            item["font_family"] = batch_font
+        if batch_frame and not item.get("override_frame_path"):
+            item["override_frame_path"] = batch_frame
+
+        if is_ready_mat:
+            item["final_material_id"] = mid
+            runnable.append(item)
+        else:
+            waitlist_by_mat.setdefault(mid, []).append(item)
+
+    if not runnable and not waitlist_by_mat:
+        await callback.message.answer("⚠️ لا توجد عناصر صالحة أو حجوزات في هذه الدفعة.")
+        await callback.answer()
+        return
+
+    await callback.answer("🚀 تم استلام الدفعة!")
+
+    # 2. حفظ قوائم الانتظار (التشويق / قبل الأختام) وإخبار المشرف بالحالة الدقيقة
+    if waitlist_by_mat:
+        wl_lines = [
+            "⏳ <b>تم تسجيل المذكرات القادمة وحفظ بيانات المدرسين في قائمة الانتظار!</b>",
+            "━━━━━━━━━━━━━━━━━━",
+        ]
+        kb_rows = []
+        for mid, wl_items in waitlist_by_mat.items():
+            q_res = await bridge_client.queue_material_teacher_entries(
+                material_id=mid,
+                entries=wl_items,
+                status="waiting_release",
+                telegram_chat_id=str(chat_id),
+                telegram_user_id=str(user_id),
             )
+            m_meta = mat_info_cache.get(mid, {})
+            m_title = (q_res or {}).get("material_title") or m_meta.get("title") or f"#{mid}"
+            has_pdf = (q_res or {}).get("has_pdf", m_meta.get("has_pdf", False))
+            layout_ok = (q_res or {}).get("layout_confirmed", m_meta.get("layout_confirmed", False))
+            if not has_pdf:
+                cond_txt = "بانتظار رفع ملف الـ PDF + ضبط أماكن الأختام (ظاهرة الآن كـ «قريباً/تشويق» في الموقع)"
+            elif not layout_ok:
+                cond_txt = "الـ PDF مرفوع ✅ — بانتظار تحديد وحفظ أماكن الأختام ليبدأ الإرسال التلقائي"
+                kb_rows.append([InlineKeyboardButton(text=f"🔤 ضبط أختام: {m_title[:25]}", callback_data=f"adm_mat_font:{mid}")])
+            else:
+                cond_txt = "جاهزة الآن للإطلاق!"
+            wl_lines.append(f"• <b>{html.escape(str(m_title))}</b> (<code>#{mid}</code>): <code>{len(wl_items)}</code> مدرس — {cond_txt}")
 
-            for pos, item in enumerate(runnable, start=1):
-                tname = str(item.get("teacher_name") or "").strip()
-                tphone = str(item.get("phone") or "").strip()
-                tseries = str(item.get("series_name") or "").strip()
-                disp_name = tname or tseries or tphone or "بدون اسم"
-                disp_phone = tphone or "بدون رقم"
-                try:
-                    await progress_msg.edit_text(
-                        f"⚙️ <b>جاري المعالجة ({pos} / {total})...</b>\n"
-                        f"👤 المدرس: {html.escape(disp_name)} (<code>{html.escape(disp_phone)}</code>)\n"
-                        f"✅ مكتمل حتى الآن: <code>{ok_count}</code>",
-                        parse_mode="HTML",
-                    )
-                except Exception:
-                    pass
+        wl_lines.append("\n💡 <i>بمجرد رفع الملف وضبط الأختام ستبدأ الطباعة والإرسال تلقائياً فوراً!</i>")
+        await bot.send_message(
+            chat_id=chat_id,
+            text="\n".join(wl_lines),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows) if kb_rows else None,
+            parse_mode="HTML",
+        )
 
-                item_wm_logo = item.get("watermark_logo_path")
-                item_wm_type = str(item.get("watermark_type") or "").strip().lower()
-                if item_wm_type == "logo" and not item_wm_logo:
-                    item_wm_type = "none"
-                elif item_wm_logo:
-                    item_wm_type = "logo"
-                elif not item_wm_type:
-                    item_wm_type = "text" if item.get("watermark_text") else "none"
-
-                payload = {
-                    "material_id": item["final_material_id"],
-                    "buyer_name_stamp": tname,
-                    "buyer_phone_stamp": tphone,
-                    "buyer_phone_stamp_2": item.get("phone_2"),
-                    "series_name": item.get("series_name"),
-                    "doc_name_stamp": item.get("series_name"),
-                    "watermark_text": None if item_wm_type == "logo" else item.get("watermark_text"),
-                    "watermark_type": item_wm_type,
-                    "watermark_logo_path": item_wm_logo,
-                    "font_family": item.get("font_family") or batch_font,
-                    "font_size": item.get("font_size"),
-                    "override_frame_path": batch_frame,
-                    "telegram_chat_id": str(chat_id),
-                    "telegram_user_id": str(user_id),
-                    "is_admin": bot_config.is_admin(user_id),
-                }
-                res = await bridge_client.direct_stamp_sync(payload)
-                if not res.get("ok"):
-                    fail_lines.append(f"#{item.get('idx')} {disp_name}: {res.get('error')}")
-                    await asyncio.sleep(0.3)
-                    continue
-
-                info = res["data"]
-                order_code = info.get("order_code")
-                pdf_bytes = await bridge_client.download_order_pdf(order_code)
-                if not pdf_bytes:
-                    fail_lines.append(f"#{item.get('idx')} {disp_name}: تعذر تنزيل الـ PDF")
-                    await asyncio.sleep(0.3)
-                    continue
-
-                mat_title = info.get("material_title", "booklet")
-                safe_name = f"{_safe_filename_part(tname or tseries or tphone or 'stamp')}_{_safe_filename_part(mat_title)}_{order_code}.pdf"
-                try:
-                    await bot.send_document(
-                        chat_id=chat_id,
-                        document=BufferedInputFile(pdf_bytes, filename=safe_name),
-                        caption=(
-                            f"✅ <b>[{pos}/{total}] {html.escape(str(mat_title))}</b>\n"
-                            f"👤 {html.escape(disp_name)} | 📱 <code>{html.escape(disp_phone)}</code>\n"
-                            f"🔖 <code>{html.escape(str(order_code))}</code> ({info.get('file_size_kb', 0)} KB)"
-                        ),
-                        parse_mode="HTML",
-                    )
-                    ok_count += 1
-                    # حذف النسخة المؤقتة على السيرفر فور استلامها بنجاح في التيليجرام لمنع امتلاء القرص
-                    await bridge_client.cleanup_order_pdf(order_code)
-                except Exception as send_err:
-                    fail_lines.append(f"#{item.get('idx')} {disp_name}: خطأ إرسال ({send_err})")
-                finally:
-                    del pdf_bytes
-                    gc.collect()
-
-                # راحة قصيرة بين كل ملف والآخر لخفض استهلاك المعالج
-                await asyncio.sleep(0.5)
-
-            summary = [
-                "🎉 <b>اكتملت الدفعة التسلسلية بنجاح!</b>",
-                "━━━━━━━━━━━━━━━━━━",
-                f"✅ ملفات مرسلة بنجاح: <code>{ok_count}</code> من <code>{total}</code>",
-                f"⚠️ متخطى / أخطاء: <code>{len(fail_lines)}</code>",
-            ]
-            if fail_lines:
-                summary.append("\n<b>تفاصيل الملاحظات:</b>")
-                for fl in fail_lines[:10]:
-                    summary.append(f"• {html.escape(str(fl))}")
-            try:
-                await progress_msg.edit_text("\n".join(summary), parse_mode="HTML")
-            except Exception:
-                await bot.send_message(chat_id=chat_id, text="\n".join(summary), parse_mode="HTML")
-
-    asyncio.create_task(_run_queue())
+    # 3. تشغيل العناصر الجاهزة فوراً بالختم المتسلسل
+    if runnable:
+        async def _run_queue():
+            await execute_stamp_items_sequential(
+                bot=bot,
+                chat_id=chat_id,
+                user_id=user_id,
+                runnable=runnable,
+                batch_font=batch_font,
+                batch_frame=batch_frame,
+                initial_skipped=skipped,
+                header_label="الدفعة التسلسلية",
+            )
+        asyncio.create_task(_run_queue())
 
 
 # ================================================================
@@ -1323,6 +1769,19 @@ def _build_font_studio_text_and_kb(
         studio_url = f"{miniapp_url}{sep}tab=admin&studio_mat={mat_id}"
         rows.append([InlineKeyboardButton(text="📱 فتح استوديو الإحداثيات بالسحب على الموبايل", web_app=WebAppInfo(url=studio_url))])
 
+    wl_cnt = int(mat.get("waiting_count") or 0)
+    comp_cnt = int(mat.get("completed_count") or 0)
+    if wl_cnt > 0:
+        rows.append([InlineKeyboardButton(
+            text=f"✅ تأكيد الأختام وإطلاق قائمة الانتظار ({wl_cnt})",
+            callback_data=f"adm_mat_confirm_wl:{mat_id}",
+        )])
+    if comp_cnt > 0:
+        rows.append([InlineKeyboardButton(
+            text=f"🔄 إعادة ختم المدرسين المحفوظين ({comp_cnt})",
+            callback_data=f"adm_mat_roster:{mat_id}",
+        )])
+
     rows.append([InlineKeyboardButton(text="🔙 رجوع لتفاصيل المذكرة", callback_data=f"adm_mat_sel:{mat_id}")])
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -1625,4 +2084,298 @@ async def process_studio_custom_size(message: Message, state: FSMContext):
     await bridge_client.quick_font_adjust(mid, {"target_type": tgt, "font_size": sz})
     await message.answer(f"✅ تم تعديل حجم الخط إلى <code>{sz}</code>! جاري إرسال المعاينة التلقائية...", parse_mode="HTML")
     await _send_or_refresh_studio_preview(message.bot, message.chat.id, mid, tgt, pg)
+
+
+# ================================================================
+# 6. إدارة سجل المدرسين وقوائم الانتظار وإعادة الختم (للكل أو لمحددين)
+# ================================================================
+
+ACTIVE_WAITLIST_RELEASES: set[int] = set()
+
+
+async def trigger_waitlist_release_once(bot: Bot, mat_id: int, fallback_chat_id: Optional[int] = None) -> int:
+    """ضمان عدم تشغيل إطلاق قائمة انتظار نفس المذكرة مرتين بالتوازي."""
+    if mat_id in ACTIVE_WAITLIST_RELEASES:
+        return 0
+    ACTIVE_WAITLIST_RELEASES.add(mat_id)
+    try:
+        return await run_material_waitlist_release(bot, mat_id, fallback_chat_id=fallback_chat_id)
+    finally:
+        ACTIVE_WAITLIST_RELEASES.discard(mat_id)
+
+
+def _entry_display_label(e: Dict[str, Any]) -> str:
+    name = str(e.get("teacher_name") or "").strip()
+    phone = str(e.get("phone") or "").strip()
+    series = str(e.get("series_name") or "").strip()
+    main = name or series or phone or f"مدرس #{e.get('id')}"
+    if phone and phone not in main:
+        return f"{main} ({phone})"
+    return main
+
+
+def _render_roster_picker(
+    mat: Dict[str, Any],
+    entries: List[Dict[str, Any]],
+    selected_ids: set[int],
+    page: int = 1,
+    page_size: int = 10,
+) -> tuple[str, InlineKeyboardMarkup]:
+    mat_id = int(mat.get("id") or 0)
+    title = html.escape(str(mat.get("title") or f"#{mat_id}"))
+    total = len(entries)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * page_size
+    page_items = entries[start : start + page_size]
+
+    lines = [
+        f"☑️ <b>اختر المدرسين المطلوب إعادة إرسال ملفاتهم: {title}</b>",
+        "━━━━━━━━━━━━━━━━━━",
+        f"👥 الإجمالي المحفوظ: <code>{total}</code> | المحددون الآن: <code>{len(selected_ids)}</code>",
+        f"<i>(صفحة {page} من {total_pages} — اضغط على اسم المدرس لتحديده أو إلغاء تحديده)</i>",
+    ]
+    rows = []
+    for e in page_items:
+        eid = int(e["id"])
+        is_sel = eid in selected_ids
+        mark = "✅" if is_sel else "⬜"
+        st_icon = "⏳" if e.get("status") == "waiting_release" else ""
+        lbl = _entry_display_label(e)[:42]
+        rows.append([InlineKeyboardButton(
+            text=f"{mark} {st_icon}{lbl}",
+            callback_data=f"adm_rst_tog:{mat_id}:{eid}:{page}",
+        )])
+
+    nav_row = []
+    if page > 1:
+        nav_row.append(InlineKeyboardButton(text="⬅️ السابق", callback_data=f"adm_rst_pick:{mat_id}:{page - 1}"))
+    if page < total_pages:
+        nav_row.append(InlineKeyboardButton(text="التالي ➡️", callback_data=f"adm_rst_pick:{mat_id}:{page + 1}"))
+    if nav_row:
+        rows.append(nav_row)
+
+    rows.append([
+        InlineKeyboardButton(text="☑️ تحديد الكل", callback_data=f"adm_rst_selall:{mat_id}:{page}"),
+        InlineKeyboardButton(text="🧹 إلغاء الكل", callback_data=f"adm_rst_clear:{mat_id}:{page}"),
+    ])
+    if selected_ids:
+        rows.append([InlineKeyboardButton(
+            text=f"🚀 إرسال الملفات للمحددين فقط ({len(selected_ids)})",
+            callback_data=f"adm_rst_go:{mat_id}",
+        )])
+    rows.append([InlineKeyboardButton(text="🔙 رجوع", callback_data=f"adm_mat_roster:{mat_id}")])
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data.startswith("adm_mat_confirm_wl:"))
+async def handle_confirm_layout_and_release_waitlist(callback: CallbackQuery):
+    if not await check_admin_perm(callback, bot_config, ("studio_fonts", "batch_vip", "materials")):
+        return
+    mat_id = int(callback.data.split(":")[1])
+    res = await bridge_client.confirm_material_layout(mat_id, trigger_waitlist=False)
+    if not res:
+        await callback.answer("⚠️ تعذر تأكيد جاهزية الأختام (تأكد من رفع الـ PDF)", show_alert=True)
+        return
+    wl_cnt = int(res.get("waiting_count") or 0)
+    if wl_cnt <= 0:
+        await callback.answer("✅ تم تأكيد جاهزية الأختام — لا يوجد مدرسون بالانتظار", show_alert=True)
+        return
+
+    await callback.answer(f"🚀 تم التأكيد! جاري إطلاق {wl_cnt} ملف بالانتظار...")
+    asyncio.create_task(trigger_waitlist_release_once(callback.bot, mat_id, fallback_chat_id=callback.message.chat.id))
+
+
+@router.callback_query(F.data.startswith("adm_mat_roster:"))
+async def handle_open_material_roster(callback: CallbackQuery):
+    if not await check_admin_perm(callback, bot_config, ("batch_vip", "studio_fonts", "materials")):
+        return
+    mat_id = int(callback.data.split(":")[1])
+    res = await bridge_client.get_material_teacher_entries(mat_id)
+    if not res:
+        await callback.answer("⚠️ تعذر جلب سجل المدرسين", show_alert=True)
+        return
+
+    mat = res.get("material") or {}
+    entries = res.get("entries") or []
+    wl_cnt = int(res.get("waiting_count") or 0)
+    comp_cnt = int(res.get("completed_count") or 0)
+    has_pdf = bool(mat.get("has_pdf"))
+    layout_ok = bool(mat.get("layout_confirmed"))
+
+    lines = [
+        f"👥 <b>سجل المدرسين للمذكرة: {html.escape(str(mat.get('title') or ''))}</b> (<code>#{mat_id}</code>)",
+        "━━━━━━━━━━━━━━━━━━",
+        f"⏳ بالانتظار للصدور: <code>{wl_cnt}</code> | ✅ محفوظ/مختوم سابقاً: <code>{comp_cnt}</code>",
+        f"📄 الـ PDF: {'✅ مرفوع' if has_pdf else '⏳ غير مرفوع بعد'} | 🔤 الأختام: {'✅ مؤكدة' if layout_ok else '⏳ لم تؤكد بعد'}",
+    ]
+    if entries:
+        lines.append("\n<b>أحدث المدرسين المسجلين:</b>")
+        for idx, e in enumerate(entries[:12], start=1):
+            st_badge = "⏳ انتظار" if e.get("status") == "waiting_release" else ("✅ مكتمل" if e.get("status") == "completed" else "⚠️ خطأ")
+            lines.append(f"{idx}. {html.escape(_entry_display_label(e))} — {st_badge}")
+        if len(entries) > 12:
+            lines.append(f"<i>... و {len(entries) - 12} مدرس آخر</i>")
+
+    rows = []
+    if has_pdf and entries:
+        if wl_cnt > 0:
+            rows.append([InlineKeyboardButton(
+                text=f"🚀 إطلاق قائمة الانتظار ({wl_cnt} مدرس)",
+                callback_data=f"adm_mat_confirm_wl:{mat_id}",
+            )])
+        rows.append([InlineKeyboardButton(
+            text=f"✅ موافقة — إرسال/إعادة ختم الكل ({len(entries)})",
+            callback_data=f"adm_rst_all:{mat_id}",
+        )])
+        rows.append([InlineKeyboardButton(
+            text="☑️ اختيار مدرسين محددين فقط",
+            callback_data=f"adm_rst_pick:{mat_id}:1",
+        )])
+    elif not has_pdf:
+        rows.append([InlineKeyboardButton(text="📤 رفع ملف الـ PDF الآن", callback_data=f"adm_mat_replace_pdf:{mat_id}")])
+
+    rows.append([InlineKeyboardButton(text="🔙 رجوع لتفاصيل المذكرة", callback_data=f"adm_mat_sel:{mat_id}")])
+    await callback.message.answer(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_rst_all:"))
+async def handle_restamp_all_entries(callback: CallbackQuery):
+    if not await check_admin_perm(callback, bot_config, ("batch_vip", "studio_fonts", "materials")):
+        return
+    mat_id = int(callback.data.split(":")[1])
+    await callback.answer("🚀 تم اعتماد إعادة الختم للجميع!")
+    chat_id = callback.message.chat.id
+    uid = callback.from_user.id
+    bot = callback.bot
+
+    async def _go():
+        await run_material_restamp(bot, chat_id, uid, mat_id, entry_ids=None)
+
+    asyncio.create_task(_go())
+
+
+@router.callback_query(F.data.startswith("adm_rst_pick:"))
+async def handle_restamp_pick_list(callback: CallbackQuery):
+    if not await check_admin_perm(callback, bot_config, ("batch_vip", "studio_fonts", "materials")):
+        return
+    parts = callback.data.split(":")
+    mat_id = int(parts[1])
+    page = int(parts[2]) if len(parts) > 2 else 1
+    uid = callback.from_user.id
+
+    res = await bridge_client.get_material_teacher_entries(mat_id)
+    if not res or not res.get("entries"):
+        await callback.answer("لا يوجد مدرسون محفوظون لهذه المذكرة", show_alert=True)
+        return
+
+    sel = _ROSTER_SELECTIONS.setdefault((uid, mat_id), set())
+    text, kb = _render_roster_picker(res["material"], res["entries"], sel, page=page)
+    try:
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_rst_tog:"))
+async def handle_restamp_toggle_teacher(callback: CallbackQuery):
+    if not await check_admin_perm(callback, bot_config, ("batch_vip", "studio_fonts", "materials")):
+        return
+    _, mid_s, eid_s, pg_s = callback.data.split(":")
+    mat_id, eid, page = int(mid_s), int(eid_s), int(pg_s)
+    uid = callback.from_user.id
+
+    sel = _ROSTER_SELECTIONS.setdefault((uid, mat_id), set())
+    if eid in sel:
+        sel.remove(eid)
+    else:
+        sel.add(eid)
+
+    res = await bridge_client.get_material_teacher_entries(mat_id)
+    if not res:
+        await callback.answer()
+        return
+    text, kb = _render_roster_picker(res["material"], res.get("entries") or [], sel, page=page)
+    try:
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_rst_selall:"))
+async def handle_restamp_select_all(callback: CallbackQuery):
+    if not await check_admin_perm(callback, bot_config, ("batch_vip", "studio_fonts", "materials")):
+        return
+    _, mid_s, pg_s = callback.data.split(":")
+    mat_id, page = int(mid_s), int(pg_s)
+    uid = callback.from_user.id
+    res = await bridge_client.get_material_teacher_entries(mat_id)
+    if not res:
+        await callback.answer()
+        return
+    entries = res.get("entries") or []
+    sel = {int(e["id"]) for e in entries}
+    _ROSTER_SELECTIONS[(uid, mat_id)] = sel
+    text, kb = _render_roster_picker(res["material"], entries, sel, page=page)
+    try:
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        pass
+    await callback.answer(f"تم تحديد {len(sel)} مدرس ✅")
+
+
+@router.callback_query(F.data.startswith("adm_rst_clear:"))
+async def handle_restamp_clear_all(callback: CallbackQuery):
+    if not await check_admin_perm(callback, bot_config, ("batch_vip", "studio_fonts", "materials")):
+        return
+    _, mid_s, pg_s = callback.data.split(":")
+    mat_id, page = int(mid_s), int(pg_s)
+    uid = callback.from_user.id
+    _ROSTER_SELECTIONS[(uid, mat_id)] = set()
+    res = await bridge_client.get_material_teacher_entries(mat_id)
+    if not res:
+        await callback.answer()
+        return
+    text, kb = _render_roster_picker(res["material"], res.get("entries") or [], set(), page=page)
+    try:
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        pass
+    await callback.answer("تم إلغاء التحديد")
+
+
+@router.callback_query(F.data.startswith("adm_rst_go:"))
+async def handle_restamp_selected_go(callback: CallbackQuery):
+    if not await check_admin_perm(callback, bot_config, ("batch_vip", "studio_fonts", "materials")):
+        return
+    mat_id = int(callback.data.split(":")[1])
+    uid = callback.from_user.id
+    selected = list(_ROSTER_SELECTIONS.pop((uid, mat_id), set()))
+    if not selected:
+        await callback.answer("⚠️ اختر مدرساً واحداً على الأقل أولاً!", show_alert=True)
+        return
+    await callback.answer(f"🚀 جاري إرسال الملفات لـ {len(selected)} مدرس مختار...")
+    chat_id = callback.message.chat.id
+    bot = callback.bot
+
+    async def _go():
+        await run_material_restamp(bot, chat_id, uid, mat_id, entry_ids=selected)
+
+    asyncio.create_task(_go())
+
+
+@router.callback_query(F.data.startswith("adm_rst_dismiss:"))
+async def handle_restamp_dismiss(callback: CallbackQuery):
+    try:
+        await callback.message.edit_text("👌 تم الحفاظ على التنسيق الجديد دون إعادة إرسال حالياً. يمكنك الإرسال في أي وقت من قائمة سجل المدرسين.")
+    except Exception:
+        pass
+    await callback.answer()
 

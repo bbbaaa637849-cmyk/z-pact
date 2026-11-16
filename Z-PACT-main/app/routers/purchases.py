@@ -104,6 +104,8 @@ def create_purchase(
     material = crud.get_material(db, data.material_id)
     if not material or not material.is_published:
         raise HTTPException(status_code=404, detail="الملف غير موجود أو غير متاح")
+    if bool(getattr(material, "is_coming_soon", False)) or not material.has_pdf:
+        raise HTTPException(status_code=400, detail="⏳ هذه المذكرة في مرحلة التشويق (قريباً) ولم يُرفع ملفها بعد")
 
     # --- التحقق من التنسيق (لو اختار واحد) ---
     stamp_layout = None
@@ -247,6 +249,8 @@ def auto_wallet_purchase(
     material = crud.get_material(db, data.material_id)
     if not material or not material.is_published:
         raise HTTPException(status_code=404, detail="الملف غير موجود أو غير متاح")
+    if bool(getattr(material, "is_coming_soon", False)) or not material.has_pdf:
+        raise HTTPException(status_code=400, detail="⏳ هذه المذكرة في مرحلة التشويق (قريباً) ولم يُرفع ملفها بعد")
 
     db.refresh(current_user) # تحديث الرصيد بعد الشحن
 

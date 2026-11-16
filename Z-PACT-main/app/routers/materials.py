@@ -297,32 +297,41 @@ def cleanup_unreferenced_original_pdf(
     summary        = "رفع ملف PDF جديد (Admin فقط)",
 )
 async def upload_material(
-    # بيانات الملف كـ Form fields (مع ملف PDF)
+    # بيانات الملف كـ Form fields (مع ملف PDF اختياري لدعم التشويق / قريباً)
     title:       str         = Form(...),
     tag:         Optional[str] = Form(None),
     description: str         = Form(None),
     price:       float       = Form(0.0),
-    price_coins: float       = Form(...),
-    pdf_file:    UploadFile  = File(..., description="ملف PDF فقط"),
+    price_coins: float       = Form(0.0),
+    pdf_file:    Optional[UploadFile] = File(None, description="ملف PDF (اختياري لمذكرات قريباً)"),
     compression_enabled: bool = Form(True),
+    is_coming_soon: Optional[bool] = Form(None),
+    is_published:   Optional[bool] = Form(None),
     cover_image: Optional[UploadFile] = File(None, description="صورة غلاف المذكرة"),
     page_frame:  Optional[UploadFile] = File(None, description="إطار الصفحة"),
     db:          Session     = Depends(get_db),
     admin:       User        = Depends(require_admin),
 ):
     """
-    رفع ملف PDF جديد للمتجر.
-    الملف بيتحفظ على السيرفر وبيتسجل في قاعدة البيانات.
-    مش بيظهر في المتجر حتى يتعمله is_published = True.
+    رفع ملف PDF جديد للمتجر أو إنشاء بطاقة تشويق (قريباً) قبل توفر ملف الـ PDF.
     """
-    file_path, total_pages = await save_and_optimize_uploaded_pdf(pdf_file)
+    has_uploaded_pdf = bool(pdf_file and (pdf_file.filename or "").strip())
+    file_path: Optional[str] = None
+    total_pages = 0
+    if has_uploaded_pdf:
+        file_path, total_pages = await save_and_optimize_uploaded_pdf(pdf_file)
+        coming_soon_flag = False
+        pub_flag = bool(is_published) if is_published is not None else False
+    else:
+        coming_soon_flag = True if is_coming_soon is None else bool(is_coming_soon)
+        pub_flag = True if is_published is None else bool(is_published)
 
     # --- حفظ صورة الغلاف لو مرفوعة ---
     cover_image_path = None
-    if cover_image:
+    if cover_image and cover_image.filename:
         cover_image_path = _save_cover_upload(cover_image, COVERS_DIR)
         logger.info(f"✓ [Upload] Cover image saved: {cover_image_path}")
-    else:
+    elif file_path:
         # استخراج أول صفحة كغلاف
         try:
             doc = fitz.open(file_path)
@@ -340,7 +349,7 @@ async def upload_material(
 
     # --- حفظ إطار الصفحة لو مرفوع (مع تفريغ الخلفية البيضاء تلقائياً) ---
     page_frame_path = None
-    if page_frame:
+    if page_frame and page_frame.filename:
         try:
             page_frame_path = _save_processed_frame_upload(page_frame, FRAMES_DIR)
             logger.info(f"✓ [Upload] Page frame saved (transparent PNG): {page_frame_path}")
@@ -365,16 +374,19 @@ async def upload_material(
             db          = db,
             data        = data,
             uploader_id = admin.id,
-            pdf_path    = settings.to_portable_storage_path(file_path, "originals"),
+            pdf_path    = settings.to_portable_storage_path(file_path, "originals") if file_path else "",
             total_pages = total_pages,
             cover_image_path = cover_image_path,
+            is_coming_soon = coming_soon_flag,
+            is_published   = pub_flag,
+            layout_confirmed = False,
         )
         invalidate_materials_cache()
-        logger.info(f"✓ [Upload] Material created in DB: {material.id}")
+        logger.info(f"✓ [Upload] Material created in DB: {material.id} (coming_soon={coming_soon_flag})")
         return schemas.MaterialOut.model_validate(material)
     except Exception as e:
         logger.error(f"❌ [Upload Error] DB creation failed: {e}")
-        if os.path.exists(file_path): os.remove(file_path)
+        if file_path and os.path.exists(file_path): os.remove(file_path)
         raise HTTPException(status_code=500, detail="فشل في تسجيل بيانات الملف في قاعدة البيانات")
 
 
@@ -639,6 +651,18 @@ async def update_material(
     if new_pdf_abs_path is not None:
         update_dict["original_pdf_path"] = settings.to_portable_storage_path(new_pdf_abs_path, "originals")
         update_dict["total_pages"] = new_total_pages
+        update_dict["is_coming_soon"] = False
+        if not cover_image_path and not material.cover_image_path and (new_total_pages or 0) > 0:
+            try:
+                doc = fitz.open(new_pdf_abs_path)
+                if len(doc) > 0:
+                    pix = doc[0].get_pixmap(matrix=fitz.Matrix(2, 2))
+                    img_name = f"{uuid.uuid4().hex}.png"
+                    pix.save(os.path.join(COVERS_DIR, img_name))
+                    update_dict["cover_image_path"] = f"/storage/covers/{img_name}"
+                doc.close()
+            except Exception as cov_err:
+                logger.warning(f"⚠️ [PATCH Cover] Could not auto-extract cover: {cov_err}")
 
     # Construct MaterialUpdate with only set fields
     try:
@@ -664,6 +688,11 @@ async def update_material(
             exclude_abs_path=new_pdf_abs_path,
         )
         logger.info(f"♻️ [Material PDF Replaced] المذكرة #{material_id} ({new_total_pages} ص) — تم الحفاظ على جميع البيانات والتنسيقات")
+        try:
+            from app.routers.internal_bridge import handle_material_readiness_and_layout_events
+            handle_material_readiness_and_layout_events(db, material, source_event="pdf_replaced")
+        except Exception as ev_err:
+            logger.warning(f"⚠️ [Readiness Hook] تعذر إرسال حدث جاهزية المذكرة: {ev_err}")
     return schemas.MaterialOut.model_validate(material)
 
 
@@ -706,6 +735,8 @@ def request_preview_token(
     material = crud.get_material(db, material_id)
     if not material or not material.is_published:
         raise HTTPException(status_code=404, detail="الملف غير موجود")
+    if bool(getattr(material, "is_coming_soon", False)) or not material.has_pdf:
+        raise HTTPException(status_code=400, detail="⏳ هذه المذكرة في مرحلة التشويق (قريباً) ولم يُرفع ملفها بعد")
 
     token = crud.create_preview_token(
         db          = db,

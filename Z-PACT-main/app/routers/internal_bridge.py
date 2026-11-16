@@ -29,8 +29,9 @@ from app.config import settings, stamp_settings
 from app.database import get_db, SessionLocal
 from app import crud, models, schemas
 from app.models import (
-    User, Material, Purchase, PurchaseStatus, StampLayout, LayoutType,
-    TeacherProfile, BotSession, BotOrder, OrderFulfillmentStatus, PaymentSMSLog, WalletTransaction
+    User, Material, MaterialTeacherEntry, Notification, Purchase, PurchaseStatus,
+    StampLayout, LayoutType, TeacherProfile, BotSession, BotOrder,
+    OrderFulfillmentStatus, PaymentSMSLog, TransactionType, WalletTransaction
 )
 from app.stamper import (
     stamp_pdf,
@@ -136,6 +137,65 @@ class InternalEventBus:
             logger.warning(f"⚠️ [Internal Event Bus] Failed to fire event: {e}")
 
 internal_event_bus = InternalEventBus()
+
+
+def handle_material_readiness_and_layout_events(
+    db: Session,
+    mat: Material,
+    source_event: str = "layout_saved",
+    trigger_waitlist: bool = True,
+) -> Dict[str, Any]:
+    """
+    فحص شرطي الجاهزية (وجود ملف الـ PDF + تأكيد أماكن الأختام) وإطلاق أحداث البوت:
+      - MATERIAL_WAITLIST_READY: عند اكتمال الشرطين مع وجود قائمة انتظار -> طباعة وإرسال تلقائي للمنتظرين
+      - MATERIAL_PDF_NEEDS_LAYOUT: عند رفع PDF مع وجود منتظرين قبل تأكيد الأختام -> تنبيه دون طباعة
+      - MATERIAL_LAYOUT_UPDATED: عند تعديل التنسيق/الملف لمذكرة لها مدرسون محفوظون -> سؤال الإدارة (الكل أو محددين)
+    """
+    waiting_count, completed_count = crud.count_material_teacher_entries(db, mat.id)
+    has_pdf = bool((mat.original_pdf_path or "").strip()) and not bool(getattr(mat, "is_coming_soon", False))
+    layout_ok = bool(getattr(mat, "layout_confirmed", False))
+    dispatched: list[str] = []
+
+    if has_pdf and layout_ok:
+        if waiting_count > 0 and trigger_waitlist:
+            dispatched.append("MATERIAL_WAITLIST_READY")
+            internal_event_bus.fire_event({
+                "event": "MATERIAL_WAITLIST_READY",
+                "material_id": mat.id,
+                "material_title": mat.title,
+                "waiting_count": waiting_count,
+                "completed_count": completed_count,
+                "source": source_event,
+            })
+        if completed_count > 0 and source_event in ("layout_saved", "pdf_replaced", "frame_updated"):
+            dispatched.append("MATERIAL_LAYOUT_UPDATED")
+            internal_event_bus.fire_event({
+                "event": "MATERIAL_LAYOUT_UPDATED",
+                "material_id": mat.id,
+                "material_title": mat.title,
+                "completed_count": completed_count,
+                "waiting_count": waiting_count,
+                "source": source_event,
+            })
+    elif has_pdf and not layout_ok and waiting_count > 0:
+        dispatched.append("MATERIAL_PDF_NEEDS_LAYOUT")
+        internal_event_bus.fire_event({
+            "event": "MATERIAL_PDF_NEEDS_LAYOUT",
+            "material_id": mat.id,
+            "material_title": mat.title,
+            "waiting_count": waiting_count,
+            "total_pages": mat.total_pages or 0,
+            "source": source_event,
+        })
+
+    return {
+        "material_id": mat.id,
+        "has_pdf": has_pdf,
+        "layout_confirmed": layout_ok,
+        "waiting_count": waiting_count,
+        "completed_count": completed_count,
+        "dispatched_events": dispatched,
+    }
 
 
 @router.websocket("/events/ws")
@@ -320,11 +380,31 @@ def get_materials_catalog(
         query = query.filter(Material.title.ilike(s) | Material.description.ilike(s))
 
     materials = query.order_by(Material.id.desc()).all()
-    
+
+    entry_counts: Dict[int, Dict[str, int]] = {}
+    if materials:
+        m_ids = [m.id for m in materials]
+        grouped = (
+            db.query(
+                MaterialTeacherEntry.material_id,
+                MaterialTeacherEntry.status,
+                func.count(MaterialTeacherEntry.id),
+            )
+            .filter(MaterialTeacherEntry.material_id.in_(m_ids))
+            .group_by(MaterialTeacherEntry.material_id, MaterialTeacherEntry.status)
+            .all()
+        )
+        for mid_row, st_row, cnt_row in grouped:
+            bucket = entry_counts.setdefault(int(mid_row), {"waiting_release": 0, "completed": 0})
+            if st_row in bucket:
+                bucket[st_row] = int(cnt_row)
+
     result = []
     for m in materials:
         resolved_orig = _resolve_material_path(m.original_pdf_path or "")
-        file_exists = bool(resolved_orig and os.path.exists(resolved_orig))
+        is_coming = bool(getattr(m, "is_coming_soon", False))
+        file_exists = (not is_coming) and bool(resolved_orig and os.path.exists(resolved_orig))
+        counts = entry_counts.get(m.id, {"waiting_release": 0, "completed": 0})
         result.append({
             "id": m.id,
             "title": m.title,
@@ -334,7 +414,12 @@ def get_materials_catalog(
             "price_coins": float(m.price_coins or 0.0),
             "total_pages": m.total_pages or 0,
             "is_published": bool(m.is_published),
+            "is_coming_soon": is_coming,
+            "layout_confirmed": bool(getattr(m, "layout_confirmed", False)),
+            "has_pdf": file_exists,
             "file_exists": file_exists,
+            "waiting_count": counts["waiting_release"],
+            "completed_count": counts["completed"],
             "cover_image_path": m.cover_image_path,
             "page_frame_path": m.page_frame_path,
             "has_frame": bool(m.page_frame_path),
@@ -490,6 +575,8 @@ def create_bot_order(
     material = crud.get_material(db, data.material_id)
     if not material or not material.is_published:
         raise HTTPException(status_code=404, detail="المادة غير متاحة أو غير منشورة")
+    if bool(getattr(material, "is_coming_soon", False)) or not (material.original_pdf_path or "").strip():
+        raise HTTPException(status_code=400, detail="⏳ هذه المذكرة في مرحلة التشويق (قريباً) ولم يُرفع ملفها بعد!")
 
     # كود الطلب الفريد
     order_code = f"ORD-{secrets.token_hex(3).upper()}"
@@ -1124,6 +1211,21 @@ async def admin_replace_material_pdf(
     try:
         mat.original_pdf_path = settings.to_portable_storage_path(new_file_path, "originals")
         mat.total_pages = total_pages
+        mat.is_coming_soon = False
+        if not mat.cover_image_path and total_pages > 0:
+            try:
+                import fitz
+                covers_dir = os.path.join(settings.STORAGE_DIR, "covers")
+                os.makedirs(covers_dir, exist_ok=True)
+                doc = fitz.open(new_file_path)
+                if len(doc) > 0:
+                    pix = doc[0].get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+                    c_name = f"cov_{secrets.token_hex(6)}.png"
+                    pix.save(os.path.join(covers_dir, c_name))
+                    mat.cover_image_path = f"/storage/covers/{c_name}"
+                doc.close()
+            except Exception as cov_err:
+                logger.warning(f"⚠️ [Admin Replace PDF] Cover auto-extract skipped: {cov_err}")
         db.commit()
         db.refresh(mat)
     except Exception:
@@ -1140,6 +1242,7 @@ async def admin_replace_material_pdf(
         exclude_abs_path=new_file_path,
     )
     logger.info(f"♻️ [Admin Bridge] تم استبدال ملف الـ PDF للمذكرة #{material_id} '{mat.title}' ({total_pages} ص) مع الحفاظ على جميع الأختام والبيانات")
+    handle_material_readiness_and_layout_events(db, mat, source_event="pdf_replaced")
     return schemas.MaterialOut.model_validate(mat)
 
 
@@ -1263,6 +1366,8 @@ async def admin_upload_material(
         page_frame_path=page_frame_path,
         total_pages=total_pages,
         is_published=True,
+        is_coming_soon=False,
+        layout_confirmed=True,
     )
     db.add(new_mat)
     db.commit()
@@ -1555,6 +1660,7 @@ async def upload_material_frame(
     except Exception:
         pass
     logger.info(f"🖼️ [Admin Frame] تم تركيب إطار شفاف للمذكرة #{material_id}: {mat.page_frame_path}")
+    handle_material_readiness_and_layout_events(db, mat, source_event="frame_updated", trigger_waitlist=False)
     return {"id": mat.id, "title": mat.title, "page_frame_path": mat.page_frame_path}
 
 
@@ -1578,12 +1684,17 @@ def get_material_layout_studio(
 ):
     mat = _get_material_or_404(db, material_id)
     layout, elements = _get_or_build_layout_elements(db, material_id)
+    waiting_count, completed_count = crud.count_material_teacher_entries(db, material_id)
     return {
         "material": {
             "id": mat.id,
             "title": mat.title,
             "tag": mat.tag,
             "total_pages": mat.total_pages or 1,
+            "is_coming_soon": bool(getattr(mat, "is_coming_soon", False)),
+            "layout_confirmed": bool(getattr(mat, "layout_confirmed", False)),
+            "waiting_count": waiting_count,
+            "completed_count": completed_count,
             "page_frame_path": mat.page_frame_path,
             "cover_image_path": mat.cover_image_path,
         },
@@ -1622,6 +1733,10 @@ def upsert_material_layout_studio(
         ),
         creator_id=creator_id,
     )
+    mat.layout_confirmed = True
+    db.commit()
+    db.refresh(mat)
+    readiness = handle_material_readiness_and_layout_events(db, mat, source_event="layout_saved")
     logger.info(f"🎨 [Mobile Studio] تم حفظ تنسيق أختام المذكرة #{mat.id} ({len(validated)} عناصر)")
     return {
         "status": "saved",
@@ -1629,6 +1744,7 @@ def upsert_material_layout_studio(
         "material_id": mat.id,
         "layout_type": saved.layout_type.value,
         "stamp_elements": saved.get_elements(),
+        "readiness": readiness,
     }
 
 
@@ -1688,10 +1804,16 @@ def quick_adjust_material_fonts(
         ),
         creator_id=creator_id,
     )
+    mat.layout_confirmed = True
+    db.commit()
+    waiting_count, completed_count = crud.count_material_teacher_entries(db, mat.id)
     return {
         "status": "updated",
         "material_id": mat.id,
         "layout_id": saved.id,
+        "layout_confirmed": True,
+        "waiting_count": waiting_count,
+        "completed_count": completed_count,
         "stamp_elements": saved.get_elements(),
     }
 
@@ -1955,6 +2077,32 @@ async def direct_stamp_sync_endpoint(
             order.status = OrderFulfillmentStatus.DELIVERED
             order.completed_at = datetime.utcnow()
             db.commit()
+
+            teacher_entry_id = None
+            try:
+                entry_obj = crud.upsert_material_teacher_entry(
+                    db=db,
+                    material_id=mat.id,
+                    teacher_name=buyer_name or None,
+                    phone=phone1 or None,
+                    phone_2=phone2,
+                    series_name=series_name,
+                    watermark_text=wm_text,
+                    watermark_type=wm_type,
+                    watermark_logo_path=wm_logo_path,
+                    font_family=payload.get("font_family"),
+                    font_size=float(payload["font_size"]) if payload.get("font_size") is not None else None,
+                    override_frame_path=payload.get("override_frame_path"),
+                    telegram_chat_id=tg_chat,
+                    telegram_user_id=tg_user,
+                    status="completed",
+                    last_order_code=order_code,
+                    entry_id=int(payload["teacher_entry_id"]) if payload.get("teacher_entry_id") else None,
+                )
+                teacher_entry_id = entry_obj.id
+            except Exception as reg_err:
+                logger.warning(f"⚠️ [Batch Roster] تعذر تسجيل المدرس في سجل المذكرة: {reg_err}")
+
             gc.collect()
             size_kb = os.path.getsize(final_path) // 1024 if os.path.exists(final_path) else 0
             logger.info(f"✅ [Batch Stamp] {order_code} جاهز ({size_kb}KB) للمدرس {buyer_name}")
@@ -1962,6 +2110,7 @@ async def direct_stamp_sync_endpoint(
                 "status": "completed",
                 "order_code": order_code,
                 "purchase_id": purchase.id,
+                "teacher_entry_id": teacher_entry_id,
                 "material_id": mat.id,
                 "material_title": mat.title,
                 "buyer_name": buyer_name,
@@ -1987,6 +2136,353 @@ async def direct_stamp_sync_endpoint(
                 except Exception:
                     pass
             raise HTTPException(status_code=500, detail=f"فشل ختم المذكرة: {e}")
+
+
+# ================================================================
+# 10. المذكرات القادمة (تشويق/حجز) + سجل المدرسين وقوائم الانتظار + شحن الكوينز بالدفعات
+# ================================================================
+
+def _serialize_teacher_entry(e: MaterialTeacherEntry) -> Dict[str, Any]:
+    return {
+        "id": e.id,
+        "material_id": e.material_id,
+        "teacher_name": e.teacher_name,
+        "phone": e.phone,
+        "phone_2": e.phone_2,
+        "series_name": e.series_name,
+        "watermark_text": e.watermark_text,
+        "watermark_type": e.watermark_type,
+        "watermark_logo_path": e.watermark_logo_path,
+        "font_family": e.font_family,
+        "font_size": e.font_size,
+        "override_frame_path": e.override_frame_path,
+        "telegram_chat_id": e.telegram_chat_id,
+        "telegram_user_id": e.telegram_user_id,
+        "status": e.status,
+        "last_order_code": e.last_order_code,
+        "error_message": e.error_message,
+        "created_at": e.created_at.isoformat() if e.created_at else None,
+        "last_stamped_at": e.last_stamped_at.isoformat() if e.last_stamped_at else None,
+    }
+
+
+@router.post("/admin/materials/upsert-upcoming", summary="إنشاء أو مطابقة مذكرة قادمة (تشويق) قبل رفع الـ PDF")
+def upsert_upcoming_material_endpoint(
+    payload: Dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+    _key: str = Depends(verify_internal_key),
+):
+    title = str(payload.get("title") or "").strip()
+    if len(title) < 2:
+        raise HTTPException(status_code=400, detail="اسم المذكرة مطلوب")
+
+    admin_user = db.query(User).filter(User.role == "admin").first() or db.query(User).first()
+    uploader_id = admin_user.id if admin_user else 1
+
+    price_val = float(payload["price"]) if payload.get("price") is not None and str(payload.get("price")).strip() != "" else None
+    coins_val = float(payload["price_coins"]) if payload.get("price_coins") is not None and str(payload.get("price_coins")).strip() != "" else None
+
+    mat, created = crud.upsert_upcoming_material(
+        db=db,
+        title=title,
+        uploader_id=uploader_id,
+        description=payload.get("description"),
+        tag=payload.get("tag"),
+        price=price_val,
+        price_coins=coins_val,
+        is_published=bool(payload.get("is_published", True)),
+    )
+    try:
+        from app.routers.materials import invalidate_materials_cache
+        invalidate_materials_cache()
+    except Exception:
+        pass
+
+    waiting_count, completed_count = crud.count_material_teacher_entries(db, mat.id)
+    return {
+        "created": created,
+        "material": {
+            "id": mat.id,
+            "title": mat.title,
+            "tag": mat.tag,
+            "description": mat.description,
+            "price": float(mat.price or 0),
+            "price_coins": float(mat.price_coins or 0),
+            "is_published": bool(mat.is_published),
+            "is_coming_soon": bool(getattr(mat, "is_coming_soon", False)),
+            "layout_confirmed": bool(getattr(mat, "layout_confirmed", False)),
+            "has_pdf": bool(mat.has_pdf),
+            "file_exists": bool(mat.has_pdf),
+            "waiting_count": waiting_count,
+            "completed_count": completed_count,
+        },
+    }
+
+
+@router.post("/admin/materials/{material_id}/teacher-entries/queue", summary="حفظ/إدراج مدرسين في قائمة انتظار أو سجل المذكرة")
+def queue_material_teacher_entries_endpoint(
+    material_id: int,
+    payload: Dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+    _key: str = Depends(verify_internal_key),
+):
+    mat = _get_material_or_404(db, material_id)
+    raw_entries = payload.get("entries") or []
+    target_status = str(payload.get("status") or "waiting_release").strip()
+    saved_items = []
+    for item in raw_entries:
+        wm_logo = str(item.get("watermark_logo_path") or "").strip() or None
+        wm_text = str(item.get("watermark_text") or "").strip() or None
+        wm_type = str(item.get("watermark_type") or ("logo" if wm_logo else ("text" if wm_text else "none"))).strip().lower()
+        if wm_type == "logo" and not wm_logo:
+            wm_type = "none"
+        entry = crud.upsert_material_teacher_entry(
+            db=db,
+            material_id=mat.id,
+            teacher_name=item.get("teacher_name") or item.get("buyer_name_stamp"),
+            phone=clean_phone_number(str(item.get("phone") or item.get("buyer_phone_stamp") or "")) or None,
+            phone_2=clean_phone_number(str(item.get("phone_2") or item.get("buyer_phone_stamp_2") or "")) or None,
+            series_name=item.get("series_name") or item.get("doc_name_stamp"),
+            watermark_text=None if wm_type == "logo" else wm_text,
+            watermark_type=wm_type,
+            watermark_logo_path=wm_logo,
+            font_family=item.get("font_family"),
+            font_size=float(item["font_size"]) if item.get("font_size") is not None else None,
+            override_frame_path=item.get("override_frame_path"),
+            telegram_chat_id=str(item.get("telegram_chat_id") or payload.get("telegram_chat_id") or "") or None,
+            telegram_user_id=str(item.get("telegram_user_id") or payload.get("telegram_user_id") or "") or None,
+            status=target_status,
+        )
+        saved_items.append(_serialize_teacher_entry(entry))
+
+    waiting_count, completed_count = crud.count_material_teacher_entries(db, mat.id)
+    has_pdf = bool(mat.has_pdf)
+    layout_ok = bool(getattr(mat, "layout_confirmed", False))
+    return {
+        "status": "queued",
+        "material_id": mat.id,
+        "material_title": mat.title,
+        "saved_count": len(saved_items),
+        "has_pdf": has_pdf,
+        "layout_confirmed": layout_ok,
+        "ready_for_auto_release": bool(has_pdf and layout_ok),
+        "waiting_count": waiting_count,
+        "completed_count": completed_count,
+        "entries": saved_items,
+    }
+
+
+@router.get("/admin/materials/{material_id}/teacher-entries", summary="عرض سجل المدرسين وقائمة الانتظار لمذكرة معينة")
+def list_material_teacher_entries_endpoint(
+    material_id: int,
+    status_filter: Optional[str] = Query(None, alias="status"),
+    db: Session = Depends(get_db),
+    _key: str = Depends(verify_internal_key),
+):
+    mat = _get_material_or_404(db, material_id)
+    entries = crud.list_material_teacher_entries(db, mat.id, status=status_filter)
+    waiting_count, completed_count = crud.count_material_teacher_entries(db, mat.id)
+    return {
+        "material": {
+            "id": mat.id,
+            "title": mat.title,
+            "tag": mat.tag,
+            "price": float(mat.price or 0),
+            "price_coins": float(mat.price_coins or 0),
+            "is_coming_soon": bool(getattr(mat, "is_coming_soon", False)),
+            "layout_confirmed": bool(getattr(mat, "layout_confirmed", False)),
+            "has_pdf": bool(mat.has_pdf),
+        },
+        "waiting_count": waiting_count,
+        "completed_count": completed_count,
+        "entries": [_serialize_teacher_entry(e) for e in entries],
+    }
+
+
+@router.post("/admin/teacher-entries/{entry_id}/mark", summary="تحديث حالة سجل مدرس أثناء/بعد التنفيذ")
+def mark_teacher_entry_endpoint(
+    entry_id: int,
+    payload: Dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+    _key: str = Depends(verify_internal_key),
+):
+    entry = db.query(MaterialTeacherEntry).filter(MaterialTeacherEntry.id == entry_id).first()
+    if not entry:
+        raise HTTPException(status_code=404, detail="السجل غير موجود")
+    if "status" in payload and payload["status"]:
+        entry.status = str(payload["status"]).strip()
+    if "last_order_code" in payload:
+        entry.last_order_code = payload["last_order_code"]
+    if "error_message" in payload:
+        entry.error_message = payload["error_message"]
+    entry.updated_at = datetime.utcnow()
+    if entry.status == "completed":
+        entry.last_stamped_at = datetime.utcnow()
+    db.commit()
+    db.refresh(entry)
+    return _serialize_teacher_entry(entry)
+
+
+@router.post("/admin/materials/{material_id}/confirm-layout", summary="تأكيد جاهزية الأختام وإطلاق قائمة الانتظار")
+def confirm_material_layout_endpoint(
+    material_id: int,
+    payload: Dict[str, Any] = Body(default={}),
+    db: Session = Depends(get_db),
+    _key: str = Depends(verify_internal_key),
+):
+    mat = _get_material_or_404(db, material_id)
+    if not mat.has_pdf:
+        raise HTTPException(status_code=400, detail="يجب رفع ملف الـ PDF للمذكرة أولاً قبل تأكيد الأختام")
+    _get_or_build_layout_elements(db, mat.id)
+    mat.layout_confirmed = True
+    db.commit()
+    db.refresh(mat)
+    trigger_wl = bool(payload.get("trigger_waitlist", True))
+    return handle_material_readiness_and_layout_events(
+        db, mat, source_event="layout_confirmed_manual", trigger_waitlist=trigger_wl
+    )
+
+
+@router.get("/admin/waitlist/ready", summary="قائمة المذكرات الجاهزة الآن ولها مدرسون في الانتظار")
+def get_ready_waitlists_endpoint(
+    db: Session = Depends(get_db),
+    _key: str = Depends(verify_internal_key),
+):
+    waiting_rows = (
+        db.query(MaterialTeacherEntry.material_id, func.count(MaterialTeacherEntry.id))
+        .filter(MaterialTeacherEntry.status == "waiting_release")
+        .group_by(MaterialTeacherEntry.material_id)
+        .all()
+    )
+    ready_list = []
+    for mid, cnt in waiting_rows:
+        mat = db.query(Material).filter(Material.id == mid).first()
+        if mat and mat.has_pdf and bool(getattr(mat, "layout_confirmed", False)):
+            ready_list.append({
+                "material_id": mat.id,
+                "material_title": mat.title,
+                "waiting_count": int(cnt),
+            })
+    return {"ready": ready_list}
+
+
+@router.post("/admin/coins/preview-batch", summary="معاينة ومطابقة حسابات المستخدمين لشحن الكوينز عبر Excel")
+def preview_batch_coin_recharges(
+    payload: Dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+    _key: str = Depends(verify_internal_key),
+):
+    items = payload.get("items") or []
+    matched = []
+    unmatched = []
+    total_coins = 0.0
+
+    for idx, item in enumerate(items, start=1):
+        try:
+            amt = float(item.get("add_coins") or 0)
+        except (TypeError, ValueError):
+            amt = 0.0
+        if amt <= 0:
+            unmatched.append({"idx": idx, "item": item, "reason": "قيمة كوينز غير صالحة (يجب أن تكون > 0)"})
+            continue
+
+        uid_val = None
+        if item.get("user_id") is not None and str(item.get("user_id")).strip().isdigit():
+            uid_val = int(str(item.get("user_id")).strip())
+
+        user, method = crud.match_user_for_coin_recharge(
+            db=db,
+            email=item.get("user_email"),
+            phone=item.get("phone"),
+            user_id=uid_val,
+            name=item.get("teacher_name"),
+        )
+        if not user:
+            reason = "اسم متكرر لأكثر من حساب — حدد الهاتف أو الإيميل" if method == "ambiguous_name" else "لم يتم العثور على حساب مطابق"
+            unmatched.append({"idx": idx, "item": item, "reason": reason})
+            continue
+
+        cur_coins = float(user.coins or 0.0)
+        total_coins += amt
+        matched.append({
+            "idx": idx,
+            "user_id": user.id,
+            "full_name": user.full_name,
+            "email": user.email,
+            "phone": user.phone,
+            "match_method": method,
+            "current_coins": cur_coins,
+            "add_coins": amt,
+            "new_coins": round(cur_coins + amt, 2),
+            "note": str(item.get("coins_note") or "").strip() or None,
+        })
+
+    return {
+        "matched_count": len(matched),
+        "unmatched_count": len(unmatched),
+        "total_coins": round(total_coins, 2),
+        "matched": matched,
+        "unmatched": unmatched,
+    }
+
+
+@router.post("/admin/coins/apply-batch", summary="تنفيذ شحن الكوينز الجماعي للحسابات المطابقة")
+def apply_batch_coin_recharges(
+    payload: Dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+    _key: str = Depends(verify_internal_key),
+):
+    items = payload.get("items") or []
+    credited = []
+    errors = []
+
+    for row in items:
+        uid = row.get("user_id")
+        try:
+            amt = float(row.get("add_coins") or 0)
+        except (TypeError, ValueError):
+            amt = 0.0
+        if not uid or amt <= 0:
+            errors.append({"row": row, "reason": "بيانات شحن غير صالحة"})
+            continue
+
+        note = str(row.get("note") or "").strip() or "شحن جماعي عبر ملف Excel من الإدارة"
+        try:
+            updated_user = crud.update_user_coins(
+                db=db,
+                user_id=int(uid),
+                amount=amt,
+                tx_type=TransactionType.RECHARGE,
+                description=note,
+            )
+            if not updated_user:
+                errors.append({"row": row, "reason": "الحساب غير موجود"})
+                continue
+            db.add(Notification(
+                user_id=updated_user.id,
+                title="💰 تم شحن رصيدك بالكوينز!",
+                message=f"تمت إضافة {amt:g} كوينز إلى محفظتك ({note}). رصيدك الحالي: {float(updated_user.coins):g} كوينز.",
+            ))
+            db.commit()
+            credited.append({
+                "user_id": updated_user.id,
+                "full_name": updated_user.full_name,
+                "email": updated_user.email,
+                "phone": updated_user.phone,
+                "added": amt,
+                "new_balance": float(updated_user.coins or 0.0),
+            })
+        except Exception as e:
+            db.rollback()
+            errors.append({"row": row, "reason": str(e)})
+
+    logger.info(f"💰 [Batch Coins] تم شحن الكوينز لـ {len(credited)} مستخدم (أخطاء: {len(errors)})")
+    return {
+        "credited_count": len(credited),
+        "error_count": len(errors),
+        "credited": credited,
+        "errors": errors,
+    }
 
 
 

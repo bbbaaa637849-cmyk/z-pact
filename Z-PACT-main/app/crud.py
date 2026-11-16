@@ -13,6 +13,7 @@
 #   crud_token     → عمليات توكنات المعاينة
 # ================================================================
 
+import re
 import secrets
 import uuid
 from datetime import datetime, timedelta
@@ -326,10 +327,13 @@ def create_material(
     pdf_path:    str,
     total_pages: int,
     cover_image_path: Optional[str] = None,
+    is_coming_soon: bool = False,
+    is_published: bool = False,
+    layout_confirmed: bool = False,
 ) -> models.Material:
     """
     إنشاء سجل ملف جديد في قاعدة البيانات.
-    الـ pdf_path هو المسار على الـ server بعد رفع الملف.
+    الـ pdf_path هو المسار على الـ server بعد رفع الملف (أو فارغ لمذكرات قريباً/تشويق).
     """
     material = models.Material(
         uploaded_by       = uploader_id,
@@ -340,7 +344,9 @@ def create_material(
         price_coins       = data.price_coins,
         original_pdf_path = pdf_path,
         total_pages       = total_pages,
-        is_published      = False,  # مش منشور تلقائياً
+        is_published      = is_published,
+        is_coming_soon    = is_coming_soon,
+        layout_confirmed  = layout_confirmed,
         compression_enabled = data.compression_enabled,
         cover_image_path  = cover_image_path,
         page_frame_path   = data.page_frame_path,
@@ -1132,4 +1138,304 @@ def enforce_device_limit_on_update(
 
     db.commit()
     return len(excess_dev_ids)
+
+
+# ================================================================
+# CRUD — UPCOMING MATERIALS, TEACHER QUEUE/ROSTER & BATCH COINS
+# ================================================================
+
+def _normalize_match_text(val: Optional[str]) -> str:
+    if not val:
+        return ""
+    s = str(val).translate(str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")).strip().lower()
+    s = re.sub(r"[\u064B-\u065F\u0670]", "", s)
+    s = re.sub(r"[أإآ]", "ا", s).replace("ى", "ي").replace("ة", "ه")
+    s = re.sub(r"[^\w\s\u0600-\u06FF]", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _normalize_match_phone(val: Optional[str]) -> str:
+    if not val:
+        return ""
+    s = str(val).translate(str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")).strip()
+    digits = re.sub(r"\D+", "", s)
+    if digits.startswith("0020") and len(digits) >= 14:
+        digits = "0" + digits[4:]
+    elif digits.startswith("20") and len(digits) == 12:
+        digits = "0" + digits[2:]
+    elif len(digits) == 10 and digits.startswith("1"):
+        digits = "0" + digits
+    return digits
+
+
+def normalize_teacher_fingerprint(
+    teacher_name: Optional[str],
+    phone: Optional[str],
+    series_name: Optional[str],
+) -> str:
+    p = _normalize_match_phone(phone)
+    n = _normalize_match_text(teacher_name)
+    s = _normalize_match_text(series_name)
+    if p or n or s:
+        return f"{p}|{n}|{s}"[:250]
+    return f"anon-{uuid.uuid4().hex[:12]}"
+
+
+def upsert_material_teacher_entry(
+    db: Session,
+    material_id: int,
+    teacher_name: Optional[str] = None,
+    phone: Optional[str] = None,
+    phone_2: Optional[str] = None,
+    series_name: Optional[str] = None,
+    watermark_text: Optional[str] = None,
+    watermark_type: str = "none",
+    watermark_logo_path: Optional[str] = None,
+    font_family: Optional[str] = None,
+    font_size: Optional[float] = None,
+    override_frame_path: Optional[str] = None,
+    telegram_chat_id: Optional[str] = None,
+    telegram_user_id: Optional[str] = None,
+    status: str = "waiting_release",
+    last_order_code: Optional[str] = None,
+    error_message: Optional[str] = None,
+    entry_id: Optional[int] = None,
+) -> models.MaterialTeacherEntry:
+    """حفظ أو تحديث بيانات مدرس في سجل المذكرة (سواء في قائمة الانتظار أو السجل الدائم لإعادة الختم)"""
+    fp = normalize_teacher_fingerprint(teacher_name, phone, series_name)
+    existing = None
+    if entry_id:
+        existing = (
+            db.query(models.MaterialTeacherEntry)
+            .filter(
+                models.MaterialTeacherEntry.id == int(entry_id),
+                models.MaterialTeacherEntry.material_id == material_id,
+            )
+            .first()
+        )
+    if not existing and fp:
+        existing = (
+            db.query(models.MaterialTeacherEntry)
+            .filter(
+                models.MaterialTeacherEntry.material_id == material_id,
+                models.MaterialTeacherEntry.stamp_fingerprint == fp,
+            )
+            .first()
+        )
+
+    now = datetime.utcnow()
+    clean_wm_type = (watermark_type or ("logo" if watermark_logo_path else ("text" if watermark_text else "none"))).strip().lower()
+    if existing:
+        if teacher_name is not None:
+            existing.teacher_name = teacher_name.strip() or existing.teacher_name
+        if phone is not None:
+            existing.phone = phone.strip() or existing.phone
+        if phone_2 is not None:
+            existing.phone_2 = phone_2.strip() or None
+        if series_name is not None:
+            existing.series_name = series_name.strip() or None
+        existing.watermark_type = clean_wm_type
+        if clean_wm_type == "logo" and watermark_logo_path:
+            existing.watermark_logo_path = watermark_logo_path
+            existing.watermark_text = None
+        elif clean_wm_type == "text":
+            existing.watermark_text = watermark_text
+            existing.watermark_logo_path = None
+        else:
+            existing.watermark_text = None
+            existing.watermark_logo_path = None
+        if font_family is not None:
+            existing.font_family = font_family
+        if font_size is not None:
+            existing.font_size = float(font_size)
+        if override_frame_path is not None:
+            existing.override_frame_path = override_frame_path
+        if telegram_chat_id:
+            existing.telegram_chat_id = str(telegram_chat_id)
+        if telegram_user_id:
+            existing.telegram_user_id = str(telegram_user_id)
+        existing.status = status
+        if last_order_code:
+            existing.last_order_code = last_order_code
+        existing.error_message = error_message
+        existing.stamp_fingerprint = normalize_teacher_fingerprint(
+            existing.teacher_name, existing.phone, existing.series_name
+        )
+        existing.updated_at = now
+        if status == "completed":
+            existing.last_stamped_at = now
+        db.commit()
+        db.refresh(existing)
+        return existing
+
+    entry = models.MaterialTeacherEntry(
+        material_id=material_id,
+        teacher_name=(teacher_name or "").strip() or None,
+        phone=(phone or "").strip() or None,
+        phone_2=(phone_2 or "").strip() or None,
+        series_name=(series_name or "").strip() or None,
+        watermark_text=None if clean_wm_type == "logo" else ((watermark_text or "").strip() or None),
+        watermark_type=clean_wm_type,
+        watermark_logo_path=watermark_logo_path if clean_wm_type == "logo" else None,
+        font_family=font_family,
+        font_size=float(font_size) if font_size is not None else None,
+        override_frame_path=override_frame_path,
+        telegram_chat_id=str(telegram_chat_id) if telegram_chat_id else None,
+        telegram_user_id=str(telegram_user_id) if telegram_user_id else None,
+        status=status,
+        last_order_code=last_order_code,
+        error_message=error_message,
+        stamp_fingerprint=fp,
+        created_at=now,
+        updated_at=now,
+        last_stamped_at=now if status == "completed" else None,
+    )
+    db.add(entry)
+    db.commit()
+    db.refresh(entry)
+    return entry
+
+
+def list_material_teacher_entries(
+    db: Session,
+    material_id: int,
+    status: Optional[str] = None,
+) -> list[models.MaterialTeacherEntry]:
+    q = db.query(models.MaterialTeacherEntry).filter(models.MaterialTeacherEntry.material_id == material_id)
+    if status:
+        q = q.filter(models.MaterialTeacherEntry.status == status)
+    return q.order_by(models.MaterialTeacherEntry.id.asc()).all()
+
+
+def count_material_teacher_entries(db: Session, material_id: int) -> tuple[int, int]:
+    """يُرجع (عدد المنتظرين للصدور، عدد المختومين المحفوظين)"""
+    rows = (
+        db.query(models.MaterialTeacherEntry.status)
+        .filter(models.MaterialTeacherEntry.material_id == material_id)
+        .all()
+    )
+    waiting = sum(1 for (st,) in rows if st == "waiting_release")
+    completed = sum(1 for (st,) in rows if st == "completed")
+    return waiting, completed
+
+
+def upsert_upcoming_material(
+    db: Session,
+    title: str,
+    uploader_id: int,
+    description: Optional[str] = None,
+    tag: Optional[str] = None,
+    price: Optional[float] = None,
+    price_coins: Optional[float] = None,
+    is_published: bool = True,
+) -> tuple[models.Material, bool]:
+    """
+    إنشاء أو تحديث مذكرة قادمة (تشويق/حجز بدون ملف PDF بعد) أو مطابقة مذكرة قائمة مع الحفاظ على سعر المنصة إذا تُرك السعر فارغاً.
+    يُرجع (material, created_bool).
+    """
+    clean_title = (title or "").strip()[:200]
+    norm_target = _normalize_match_text(clean_title)
+    existing = None
+    if norm_target:
+        all_mats = db.query(models.Material).order_by(models.Material.id.asc()).all()
+        for m in all_mats:
+            if _normalize_match_text(m.title) == norm_target:
+                existing = m
+                break
+
+    if existing:
+        changed = False
+        clean_desc = (description or "").strip() if description is not None else ""
+        if clean_desc and (not existing.description or existing.is_coming_soon):
+            existing.description = clean_desc
+            changed = True
+        clean_tag = (tag or "").strip() if tag is not None else ""
+        if clean_tag and (not existing.tag or existing.tag == "مذكرات عامة" or existing.is_coming_soon):
+            existing.tag = clean_tag[:100]
+            changed = True
+        # لو تم تمرير سعر صريح في الإكسيل للمذكرة القادمة/الجديدة، نطبّقه؛ وإن تُرك فارغاً نُبقي سعر المنصة كما هو
+        if price is not None and (existing.is_coming_soon or float(existing.price or 0) == 0):
+            existing.price = float(price)
+            if price_coins is None and (existing.is_coming_soon or float(existing.price_coins or 0) == 0):
+                existing.price_coins = float(price)
+            changed = True
+        if price_coins is not None and (existing.is_coming_soon or float(existing.price_coins or 0) == 0):
+            existing.price_coins = float(price_coins)
+            changed = True
+        if existing.is_coming_soon and is_published and not existing.is_published:
+            existing.is_published = True
+            changed = True
+        if changed:
+            db.commit()
+            db.refresh(existing)
+        return existing, False
+
+    eff_price = float(price) if price is not None else (float(price_coins) if price_coins is not None else 0.0)
+    eff_coins = float(price_coins) if price_coins is not None else eff_price
+    eff_desc = (description or "").strip() or None
+    eff_tag = (tag or "").strip()[:100] if tag else "مذكرات عامة"
+
+    mat = models.Material(
+        uploaded_by=uploader_id,
+        title=clean_title,
+        tag=eff_tag,
+        description=eff_desc,
+        price=eff_price,
+        price_coins=eff_coins,
+        original_pdf_path="",
+        total_pages=0,
+        is_published=is_published,
+        is_coming_soon=True,
+        layout_confirmed=False,
+        compression_enabled=True,
+    )
+    db.add(mat)
+    db.commit()
+    db.refresh(mat)
+    return mat, True
+
+
+def match_user_for_coin_recharge(
+    db: Session,
+    email: Optional[str] = None,
+    phone: Optional[str] = None,
+    user_id: Optional[int] = None,
+    name: Optional[str] = None,
+) -> tuple[Optional[models.User], str]:
+    """مطابقة دقيقة لحساب المستخدم عند شحن الكوينز عبر ملف Excel/Word."""
+    if user_id is not None:
+        u = get_user_by_id(db, int(user_id))
+        if u:
+            return u, "exact_id"
+
+    clean_email = (email or "").strip().lower()
+    if clean_email:
+        all_users = db.query(models.User).all()
+        u = next((x for x in all_users if (x.email or "").strip().lower() == clean_email), None)
+        if u:
+            return u, "email"
+
+    clean_phone = _normalize_match_phone(phone)
+    if clean_phone:
+        tail = clean_phone[-10:] if len(clean_phone) >= 10 else clean_phone
+        users = db.query(models.User).all()
+        for u in users:
+            up = _normalize_match_phone(u.phone)
+            if up and (up == clean_phone or (tail and up.endswith(tail))):
+                return u, "phone"
+            em_local = (u.email or "").split("@")[0]
+            em_digits = _normalize_match_phone(em_local)
+            if em_digits and (em_digits == clean_phone or (tail and em_digits.endswith(tail))):
+                return u, "phone_email"
+
+    norm_name = _normalize_match_text(name)
+    if norm_name:
+        users = db.query(models.User).all()
+        matches = [u for u in users if _normalize_match_text(u.full_name) == norm_name]
+        if len(matches) == 1:
+            return matches[0], "exact_name"
+        if len(matches) > 1:
+            return None, "ambiguous_name"
+
+    return None, "not_found"
 

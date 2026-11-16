@@ -2576,40 +2576,46 @@
       }
 
       grid.innerHTML = items.map(m => {
+        const isComingSoon = Boolean(m.is_coming_soon || m.has_pdf === false);
         const coverStyle = m.cover_image_path ? `background-image: url('${m.cover_image_path}');` : '';
-        const coverFallback = !m.cover_image_path ? (m.title ? m.title.substring(0, 2) : '📄') : '';
+        const coverFallback = !m.cover_image_path ? (isComingSoon ? '⏳' : (m.title ? m.title.substring(0, 2) : '📄')) : '';
         const price = m.price_coins || m.price || 0;
-        const pages = m.total_pages ? `${m.total_pages} صفحة` : '';
+        const pages = (!isComingSoon && m.total_pages) ? `${m.total_pages} صفحة` : '';
         const tag = m.tag || 'عام';
         const ratingScore = m.avg_rating || (m.reviews_count ? Number(m.avg_rating || 5).toFixed(1) : null);
-        const ratingBadge = ratingScore 
-          ? `<span class="mobile-card-rating-badge">⭐ ${ratingScore}</span>`
-          : `<span class="mobile-card-rating-badge" style="color:var(--text-muted);border-color:rgba(255,255,255,0.1);background:rgba(255,255,255,0.03);">⭐ مراجعات موثقة</span>`;
+        const ratingBadge = isComingSoon
+          ? `<span class="mobile-card-rating-badge" style="color:#fcd34d;border-color:rgba(245,158,11,0.35);background:rgba(245,158,11,0.12);">⏳ تشويق قريباً</span>`
+          : (ratingScore 
+            ? `<span class="mobile-card-rating-badge">⭐ ${ratingScore}</span>`
+            : `<span class="mobile-card-rating-badge" style="color:var(--text-muted);border-color:rgba(255,255,255,0.1);background:rgba(255,255,255,0.03);">⭐ مراجعات موثقة</span>`);
 
-        const inBundle = window.isMaterialInBundle ? window.isMaterialInBundle(m.id) : false;
+        const inBundle = (!isComingSoon && window.isMaterialInBundle) ? window.isMaterialInBundle(m.id) : false;
 
         return `
-          <div class="material-card ${inBundle ? 'selected-in-bundle' : ''}" onclick="openPreview(${m.id}); triggerHaptic(10);">
+          <div class="material-card ${inBundle ? 'selected-in-bundle' : ''}" onclick="${isComingSoon ? `openPreview(${m.id}); triggerHaptic(10);` : `openPreview(${m.id}); triggerHaptic(10);`}">
             <div class="card-cover" style="${coverStyle}">
               ${coverFallback}
               <span style="position:absolute;top:10px;right:10px;background:rgba(15,23,42,0.85);backdrop-filter:blur(6px);border:1px solid rgba(255,255,255,0.15);font-size:11px;padding:3px 10px;border-radius:20px;font-weight:800;color:#38bdf8;">${tag}</span>
-              ${inBundle ? `<span style="position:absolute;top:10px;left:10px;background:linear-gradient(135deg,#059669,#10b981);font-size:11px;padding:3px 9px;border-radius:20px;font-weight:900;color:#fff;box-shadow:0 2px 10px rgba(16,185,129,0.5);">✓ في السلة</span>` : ''}
+              ${isComingSoon ? `<span style="position:absolute;top:10px;left:10px;background:linear-gradient(135deg,#f59e0b,#9333ea);font-size:11px;padding:3px 10px;border-radius:20px;font-weight:900;color:#fff;box-shadow:0 2px 10px rgba(245,158,11,0.4);">⏳ قريباً</span>` : ''}
+              ${(!isComingSoon && inBundle) ? `<span style="position:absolute;top:10px;left:10px;background:linear-gradient(135deg,#059669,#10b981);font-size:11px;padding:3px 9px;border-radius:20px;font-weight:900;color:#fff;box-shadow:0 2px 10px rgba(16,185,129,0.5);">✓ في السلة</span>` : ''}
               ${pages ? `<span style="position:absolute;bottom:10px;left:10px;background:rgba(0,0,0,0.7);font-size:11px;padding:2px 8px;border-radius:8px;font-weight:700;color:#cbd5e1;">📄 ${pages}</span>` : ''}
             </div>
             <div class="card-body">
               <h3 class="card-title">${m.title}</h3>
-              <p class="card-desc">${m.description || 'محتوى ومذكرة تعليمية حصرية ومحمية بأحدث تقنيات الختم الذكي.'}</p>
+              <p class="card-desc">${m.description || (isComingSoon ? 'مذكرة مرتقبة قريباً على المنصة — يتم تجهيز المحتوى والأختام الآن!' : 'محتوى ومذكرة تعليمية حصرية ومحمية بأحدث تقنيات الختم الذكي.')}</p>
               
               <div class="mobile-card-meta-row">
                 <div class="mobile-card-price-badge">
-                  <span>${price}</span>
+                  <span>${price > 0 ? price : (isComingSoon ? 'يُحدد قريباً' : 0)}</span>
                   <img src="/frontend/assets/zpact_coin.png" alt="🪙">
                 </div>
                 ${ratingBadge}
               </div>
 
               <div class="mobile-card-actions">
-                <button type="button" class="btn-card-preview" style="flex: 0 0 auto; padding: 10px 10px;"
+                ${isComingSoon
+                  ? `<div style="width:100%;text-align:center;padding:10px 12px;border-radius:12px;background:linear-gradient(135deg,rgba(245,158,11,0.16),rgba(168,85,247,0.16));border:1px solid rgba(245,158,11,0.4);color:#fcd34d;font-weight:800;font-size:13px;">⏳ قريباً على المنصة — جاري التجهيز</div>`
+                  : `<button type="button" class="btn-card-preview" style="flex: 0 0 auto; padding: 10px 10px;"
                         onclick="event.stopPropagation(); window.open('/frontend/pages/preview.html?id=${m.id}', '_blank'); triggerHaptic(10);" title="معاينة">
                   <span>👀</span>
                 </button>
@@ -2620,7 +2626,8 @@
                 <button type="button" class="btn-card-buy" style="flex: 1 1 48%;"
                         onclick="event.stopPropagation(); prepareBuy(${m.id}); triggerHaptic(15);">
                   <span>⚡</span> <span>شراء</span>
-                </button>
+                </button>`
+                }
               </div>
             </div>
           </div>
@@ -2646,6 +2653,10 @@
       try {
         const m = allMaterials.find(x => x.id == materialId) || materialsCache.find(x => x.id == materialId);
         if (!m) return;
+        if (m.is_coming_soon || m.has_pdf === false) {
+          showToast(`⏳ ${m.title}: قريباً على المنصة — جاري تجهيزها ونشرها قريباً!`, 'info', 4000);
+          return;
+        }
 
         currentPreviewId = m.id;
         currentPreviewPrice = m.price_coins || m.price;
@@ -3534,6 +3545,11 @@
     }
 
     window.toggleBundleItem = function(id) {
+      const mObj = allMaterials.find(m => Number(m.id) === Number(id));
+      if (mObj && (mObj.is_coming_soon || mObj.has_pdf === false)) {
+        showToast('⏳ هذه المذكرة قيد التجهيز (قريباً) ولا يمكن إضافتها للسلة بعد', 'info', 3000);
+        return;
+      }
       triggerHaptic(18);
       const numId = Number(id);
       const idx = bundleCartIds.indexOf(numId);
@@ -3768,6 +3784,10 @@
     window.prepareBuy = function (id) {
       currentMaterial = allMaterials.find(m => m.id == id) || materialsCache.find(m => m.id == id);
       if (!currentMaterial) return;
+      if (currentMaterial.is_coming_soon || currentMaterial.has_pdf === false) {
+        showToast(`⏳ ${currentMaterial.title}: قريباً على المنصة — جاري التجهيز الآن`, 'info', 3500);
+        return;
+      }
       document.getElementById('buy-material-name').textContent = currentMaterial.title;
       const price = currentMaterial.price_coins || currentMaterial.price;
       document.getElementById('buy-price').innerHTML = `<img src='/frontend/assets/zpact_coin.png' class='coin-icon' alt='Z' style='width: 20px; height: 20px; vertical-align: middle;'> ${price} كوينز`;

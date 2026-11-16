@@ -800,17 +800,27 @@ async def handle_admin_view_materials(callback: CallbackQuery):
         await callback.answer()
         return
 
-    usable_mats = filter_usable_materials(materials)
-    text = f"📚 <b>قائمة المذكرات والأسعار الحالية ({len(usable_mats)} مذكرة جاهزة):</b>\nاضغط على أي مذكرة للتحكم بالسعر والخطوط والإطار:\n"
+    from bot_service.services.batch_parser import filter_admin_materials
+    usable_mats = filter_admin_materials(materials)
+    text = f"📚 <b>قائمة المذكرات والأسعار الحالية ({len(usable_mats)} مذكرة):</b>\nاضغط على أي مذكرة للتحكم بالسعر والخطوط والإطار أو قوائم الانتظار:\n"
     buttons = []
     if bot_config.has_permission(uid, "batch_vip"):
         buttons.append([InlineKeyboardButton(text="📗 تنزيل ملف Excel بالأسماء والخامات", callback_data="adm_view:materials_excel")])
     for m in usable_mats[:45]:
-        pub_icon = "🟢" if m.get("is_published", True) else "🔴"
+        is_coming = bool(m.get("is_coming_soon", False))
+        layout_ok = bool(m.get("layout_confirmed", True))
+        wl_cnt = int(m.get("waiting_count") or 0)
+        if is_coming:
+            pub_icon = "⏳"
+        elif not layout_ok:
+            pub_icon = "🟡"
+        else:
+            pub_icon = "🟢" if m.get("is_published", True) else "🔴"
         fr_icon = " 🖼️" if m.get("has_frame") else ""
+        wl_suffix = f" [انتظار: {wl_cnt}]" if wl_cnt > 0 else ""
         title = m.get("title", "")
         price = m.get("price", 0)
-        btn_text = f"{pub_icon}{fr_icon} {title} (#{m['id']}) — ({price} ج.م)"
+        btn_text = f"{pub_icon}{fr_icon} {title} (#{m['id']}) — ({price} ج.م){wl_suffix}"
         buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"adm_mat_sel:{m['id']}")])
 
     if bot_config.has_permission(uid, "materials"):
@@ -836,20 +846,42 @@ async def handle_admin_material_detail(callback: CallbackQuery):
 
     is_pub = mat.get("is_published", True)
     has_frame = bool(mat.get("has_frame"))
+    is_coming = bool(mat.get("is_coming_soon", False))
+    layout_ok = bool(mat.get("layout_confirmed", True))
+    wl_cnt = int(mat.get("waiting_count") or 0)
+    comp_cnt = int(mat.get("completed_count") or 0)
+
     status_str = "🟢 منشورة وتظهر في المتجر" if is_pub else "🔴 مخفية عن الطلاب والمدرسين"
+    if is_coming:
+        ready_str = "⏳ قريباً (تشويق — بانتظار رفع ملف الـ PDF)"
+    elif not layout_ok:
+        ready_str = "🟡 تم رفع الـ PDF — بانتظار ضبط وتأكيد أماكن الأختام"
+    else:
+        ready_str = "✅ ملف الـ PDF + الأختام جاهزان"
     frame_str = "🖼️ إطار صفحات مدمج (شفاف)" if has_frame else "بدون إطار مخصص"
 
     text = (
         f"📖 <b>تفاصيل المذكرة:</b> {html.escape(mat.get('title', ''))} (<code>#{mat_id}</code>)\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"💵 <b>السعر الحالي:</b> <code>{mat.get('price', 0)}</code> ج.م\n"
+        f"💵 <b>السعر الحالي:</b> <code>{mat.get('price', 0)}</code> ج.م | 🪙 <b>الكوينز:</b> <code>{mat.get('price_coins', 0)}</code>\n"
         f"📄 <b>عدد الصفحات:</b> {mat.get('total_pages', 0)} صفحة\n"
         f"🏷️ <b>التصنيف:</b> {html.escape(mat.get('tag') or 'عام')}\n"
+        f"🧩 <b>الجاهزية:</b> {ready_str}\n"
+        f"👥 <b>المدرسون:</b> بالانتظار: <code>{wl_cnt}</code> | محفوظ/مكتمل: <code>{comp_cnt}</code>\n"
         f"🖼️ <b>الإطار:</b> {frame_str}\n"
         f"📊 <b>حالة العرض:</b> {status_str}\n\n"
         f"اختر الإجراء المطلوب من الأزرار أدناه:"
     )
-    kb = get_admin_material_item_keyboard(mat_id, is_pub, has_frame=has_frame, user_id=uid)
+    kb = get_admin_material_item_keyboard(
+        mat_id,
+        is_pub,
+        has_frame=has_frame,
+        user_id=uid,
+        is_coming_soon=is_coming,
+        layout_confirmed=layout_ok,
+        waiting_count=wl_cnt,
+        completed_count=comp_cnt,
+    )
     await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 

@@ -1977,6 +1977,321 @@ class TestIsolatedMobileStudioBridgeAPI(unittest.TestCase):
         asyncio.run(studio_mod._safe_report_wait_error(broken_wait, fallback_msg, "خطأ تجريبي"))
         self.assertEqual(fallback_sent, ["خطأ تجريبي"])
 
+    def test_22_upcoming_teaser_reservations_layout_gate_waitlist_autorelease_and_selective_restamp(self):
+        """
+        التحقق المتكامل من:
+        1. قراءة ملف Excel يحتوي على مذكرة جديدة قادمة (وصف + سعر في أول صف فقط) + ترك السعر فارغاً لمذكرة قائمة (يأخذ سعر المنصة).
+        2. إنشاء بطاقة التشويق (قريباً) على الموقع بدون ملف PDF، ومنع المعاينة/الشراء قبل صدور الـ PDF.
+        3. حفظ المدرسين في قائمة الانتظار، والتحقق من عدم البدء بالطباعة بعد رفع الـ PDF وحده قبل ضبط/تأكيد أماكن الأختام.
+        4. إطلاق قائمة الانتظار تلقائياً فور حفظ أماكن الأختام، وحفظ سجل المدرسين على المذكرة.
+        5. تعديل أماكن الأختام لاحقاً وإرسال النسخ المعدلة لمدرس محدد فقط دون بقية المدرسين.
+        """
+        import asyncio
+        import io
+        import openpyxl
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        import app.routers.internal_bridge as bridge_mod
+        import bot_service.handlers.admin_studio as studio_mod
+        from bot_service.services.batch_parser import parse_uploaded_batch_file
+
+        # 1. توكن أدمن للموقع لاختبار مسارات الموقع (/api/materials, /api/layouts)
+        from app.auth import create_access_token
+        adm_jwt = create_access_token(user_id=1, role="admin")
+        adm_headers = {"Authorization": f"Bearer {adm_jwt}"}
+
+        # مذكرة قائمة بسعر منصة 175 للتأكد من الحفاظ على سعر المنصة عند ترك السعر فارغاً في Excel
+        existing_mat = self.client.post(
+            "/api/internal/admin/materials/upload",
+            headers=self.headers,
+            data={"title": "مذكرة النحو المتقدم", "tag": "عربي", "price": "175", "price_coins": "175"},
+            files={"file": ("nahw.pdf", _make_sample_pdf_bytes(2), "application/pdf")},
+        )
+        self.assertEqual(existing_mat.status_code, 200, existing_mat.text)
+        existing_id = existing_mat.json()["id"]
+
+        # 2. إنشاء ملف Excel حجوزات: المذكرة الجديدة بالوصف والسعر في أول صف فقط (بدون تكرار) + صف لمذكرة قائمة بسعر فارغ
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "الحجوزات"
+        ws.append(["اسم المدرس", "رقم الهاتف", "المذكرة", "وصف المذكرة", "السعر", "اسم السلسلة", "العلامة المائية"])
+        ws.append(["أ/ حسام حسن", "01012345678", "مراجعة الفيزياء الذرية 2026", "مراجعة شاملة + حل النماذج", "95", "سلسلة المتميز", "نسخة حسام"])
+        ws.append(["د/ سمر نبيل", "01198765432", "مراجعة الفيزياء الذرية 2026", "", "", "سلسلة النور", "لا للنشر"])
+        ws.append(["أ/ كريم عادل", "01255554444", "مذكرة النحو المتقدم", "", "", "سلسلة البيان", ""])
+        xls_buf = io.BytesIO()
+        wb.save(xls_buf)
+
+        parsed_rows, _ = parse_uploaded_batch_file("reservations.xlsx", xls_buf.getvalue(), is_admin=True)
+        self.assertEqual(len(parsed_rows), 3)
+        self.assertEqual(parsed_rows[0]["material_description"], "مراجعة شاملة + حل النماذج")
+        self.assertEqual(parsed_rows[0]["material_price"], 95.0)
+        self.assertNotIn("material_price", parsed_rows[2])
+
+        # التحقق من الإبقاء على سعر المنصة للمذكرة القائمة عند ترك الخانة فارغة
+        up_exist = self.client.post(
+            "/api/internal/admin/materials/upsert-upcoming",
+            headers=self.headers,
+            json={"title": "مذكرة النحو المتقدم", "price": None, "price_coins": None},
+        )
+        self.assertEqual(up_exist.status_code, 200)
+        self.assertEqual(float(up_exist.json()["material"]["price"]), 175.0)
+
+        # إنشاء المذكرة الجديدة كـ "قريباً / تشويق" على الموقع بدون PDF
+        up_new = self.client.post(
+            "/api/internal/admin/materials/upsert-upcoming",
+            headers=self.headers,
+            json={
+                "title": parsed_rows[0]["material_ref"],
+                "description": parsed_rows[0]["material_description"],
+                "price": parsed_rows[0]["material_price"],
+                "price_coins": parsed_rows[0]["material_price"],
+                "tag": "فيزياء",
+            },
+        )
+        self.assertEqual(up_new.status_code, 200, up_new.text)
+        new_mat_data = up_new.json()["material"]
+        new_mid = new_mat_data["id"]
+        self.assertTrue(new_mat_data["is_coming_soon"])
+        self.assertFalse(new_mat_data["has_pdf"])
+        self.assertFalse(new_mat_data["layout_confirmed"])
+
+        # تظهر في الموقع كـ تشويق قريباً، ويُمنع الطلب/المعاينة قبل نزول الملف
+        pub_list = self.client.get("/api/materials/").json()["items"]
+        teaser = next((m for m in pub_list if m["id"] == new_mid), None)
+        self.assertIsNotNone(teaser)
+        self.assertTrue(teaser["is_coming_soon"])
+        self.assertEqual(
+            self.client.post(
+                f"/api/materials/{new_mid}/preview-token",
+                headers=adm_headers,
+                json={"material_id": new_mid},
+            ).status_code,
+            400,
+        )
+        self.assertEqual(
+            self.client.post(
+                "/api/internal/orders/create",
+                headers=self.headers,
+                json={"material_id": new_mid, "telegram_chat_id": "8287744705", "telegram_user_id": "8287744705", "total_amount": 220},
+            ).status_code,
+            400,
+        )
+
+        # إدراج المدرسين في قائمة الانتظار
+        q_res = self.client.post(
+            f"/api/internal/admin/materials/{new_mid}/teacher-entries/queue",
+            headers=self.headers,
+            json={
+                "entries": parsed_rows[:2],
+                "status": "waiting_release",
+                "telegram_chat_id": "8287744705",
+                "telegram_user_id": "8287744705",
+            },
+        )
+        self.assertEqual(q_res.status_code, 200, q_res.text)
+        self.assertEqual(q_res.json()["waiting_count"], 2)
+        self.assertFalse(q_res.json()["ready_for_auto_release"])
+        entry_ids = [e["id"] for e in q_res.json()["entries"]]
+
+        # التقاط الأحداث الفورية المرسلة للبوت
+        fired_events = []
+        with patch.object(bridge_mod.internal_event_bus, "fire_event", side_effect=lambda ev: fired_events.append(ev)):
+            # 3. رفع ملف الـ PDF وحده قبل ضبط الأختام -> لا تتحول القائمة لـ READY بل ترسل تنبيه MATERIAL_PDF_NEEDS_LAYOUT
+            patch_pdf = self.client.patch(
+                f"/api/materials/{new_mid}",
+                headers=adm_headers,
+                files={"pdf_file": ("atomic_physics.pdf", _make_sample_pdf_bytes(2), "application/pdf")},
+            )
+            self.assertEqual(patch_pdf.status_code, 200, patch_pdf.text)
+            self.assertFalse(patch_pdf.json()["is_coming_soon"])
+            self.assertTrue(patch_pdf.json()["has_pdf"])
+            self.assertFalse(patch_pdf.json()["layout_confirmed"])
+            self.assertTrue(any(ev.get("event") == "MATERIAL_PDF_NEEDS_LAYOUT" for ev in fired_events), fired_events)
+            self.assertFalse(any(ev.get("event") == "MATERIAL_WAITLIST_READY" for ev in fired_events))
+            self.assertEqual(self.client.get("/api/internal/admin/waitlist/ready", headers=self.headers).json()["ready"], [])
+
+            # 4. ضبط وحفظ أماكن الأختام من مصمم الموقع -> يطلق MATERIAL_WAITLIST_READY فوراً!
+            fired_events.clear()
+            ly_res = self.client.post(
+                "/api/layouts/",
+                headers=adm_headers,
+                json={
+                    "material_id": new_mid,
+                    "layout_type": "default",
+                    "stamp_elements": [
+                        {"type": "name", "page": 0, "x_pct": 25.0, "y_pct": 15.0, "font_size": 14, "font_family": "cairo"},
+                        {"type": "phone", "page": 0, "x_pct": 75.0, "y_pct": 85.0, "font_size": 14, "font_family": "cairo"},
+                    ],
+                },
+            )
+            self.assertIn(ly_res.status_code, (200, 201), ly_res.text)
+            self.assertTrue(any(ev.get("event") == "MATERIAL_WAITLIST_READY" for ev in fired_events), fired_events)
+            ready_wls = self.client.get("/api/internal/admin/waitlist/ready", headers=self.headers).json()["ready"]
+            self.assertTrue(any(r["material_id"] == new_mid and r["waiting_count"] == 2 for r in ready_wls))
+
+        # تنفيذ إطلاق قائمة الانتظار من محرك البوت
+        sent_docs = []
+
+        async def _fake_send_document(chat_id, document, caption="", parse_mode=None):
+            sent_docs.append((chat_id, document.filename, len(document.data), caption))
+
+        async def _fake_send_message(chat_id, text, **kwargs):
+            return SimpleNamespace(edit_text=lambda *a, **kw: asyncio.sleep(0))
+
+        fake_bot = SimpleNamespace(send_document=_fake_send_document, send_message=_fake_send_message)
+
+        async def _proxy_get_entries(mid, status=None):
+            q = f"?status={status}" if status else ""
+            return self.client.get(f"/api/internal/admin/materials/{mid}/teacher-entries{q}", headers=self.headers).json()
+
+        async def _proxy_direct_stamp(payload):
+            r = self.client.post("/api/internal/orders/direct-stamp-sync", headers=self.headers, json=payload)
+            return {"ok": r.status_code == 200, "data": r.json()} if r.status_code == 200 else {"ok": False, "error": r.text}
+
+        async def _proxy_download(ocode):
+            r = self.client.get(f"/api/internal/orders/{ocode}/download", headers=self.headers)
+            return r.content if r.status_code == 200 else None
+
+        async def _proxy_cleanup(ocode):
+            r = self.client.post(f"/api/internal/orders/{ocode}/cleanup-file", headers=self.headers)
+            return r.status_code == 200
+
+        async def _proxy_mark(eid, st, **kw):
+            return self.client.post(f"/api/internal/admin/teacher-entries/{eid}/mark", headers=self.headers, json={"status": st, **kw}).json()
+
+        with (
+            patch.object(studio_mod.bridge_client, "get_material_teacher_entries", _proxy_get_entries),
+            patch.object(studio_mod.bridge_client, "direct_stamp_sync", _proxy_direct_stamp),
+            patch.object(studio_mod.bridge_client, "download_order_pdf", _proxy_download),
+            patch.object(studio_mod.bridge_client, "cleanup_order_pdf", _proxy_cleanup),
+            patch.object(studio_mod.bridge_client, "mark_teacher_entry", _proxy_mark),
+        ):
+            released = asyncio.run(studio_mod.trigger_waitlist_release_once(fake_bot, new_mid, fallback_chat_id=8287744705))
+            self.assertEqual(released, 2)
+            self.assertEqual(len(sent_docs), 2)
+
+            # الآن انتقل الاثنان إلى مكتمل ومحفوظ بالسجل
+            roster_after = self.client.get(f"/api/internal/admin/materials/{new_mid}/teacher-entries", headers=self.headers).json()
+            self.assertEqual(roster_after["waiting_count"], 0)
+            self.assertEqual(roster_after["completed_count"], 2)
+
+            # 5. تعديل أماكن الأختام مرة أخرى -> يُطلق MATERIAL_LAYOUT_UPDATED وإعادة إرسال لمدرس محدد واحد فقط
+            fired_events.clear()
+            with patch.object(bridge_mod.internal_event_bus, "fire_event", side_effect=lambda ev: fired_events.append(ev)):
+                self.client.post(
+                    "/api/layouts/",
+                    headers=adm_headers,
+                    json={
+                        "material_id": new_mid,
+                        "layout_type": "default",
+                        "stamp_elements": [
+                            {"type": "name", "page": 0, "x_pct": 40.0, "y_pct": 20.0, "font_size": 16, "font_family": "cairo"},
+                        ],
+                    },
+                )
+            self.assertTrue(any(ev.get("event") == "MATERIAL_LAYOUT_UPDATED" and ev.get("completed_count") == 2 for ev in fired_events), fired_events)
+
+            sent_docs.clear()
+            only_one_id = [entry_ids[0]]
+            re_count = asyncio.run(studio_mod.run_material_restamp(fake_bot, 8287744705, 8287744705, new_mid, entry_ids=only_one_id))
+            self.assertEqual(re_count, 1)
+            self.assertEqual(len(sent_docs), 1)
+            self.assertIn("حسام حسن", sent_docs[0][3])
+
+    def test_23_batch_coins_recharge_via_excel_preview_and_apply(self):
+        """التحقق من استخراج طلبات شحن الكوينز من ملف Excel ومعاينتها ثم إضافتها لأرصدة الحسابات."""
+        import io
+        import openpyxl
+        from app.models import CoinTransaction, Notification
+        from bot_service.services.batch_parser import (
+            parse_coins_recharges_from_file,
+            parse_uploaded_batch_file,
+        )
+
+        # إنشاء حسابين تجريبيين بالهاتف والإيميل
+        db = self.TestingSession()
+        try:
+            u1 = User(
+                full_name="مدرس اختبار كوينز ١",
+                email="coin_u1@zpact.test",
+                phone="01077778888",
+                password_hash=hash_password("Pass123!"),
+                role=UserRole.CUSTOMER,
+                is_active=True,
+                coins=25.0,
+            )
+            u2 = User(
+                full_name="مدرس اختبار كوينز ٢",
+                email="coin_u2@zpact.test",
+                phone="01166665555",
+                password_hash=hash_password("Pass123!"),
+                role=UserRole.CUSTOMER,
+                is_active=True,
+                coins=10.0,
+            )
+            db.add_all([u1, u2])
+            db.commit()
+            db.refresh(u1)
+            db.refresh(u2)
+            u1_id, u2_id = u1.id, u2.id
+        finally:
+            db.close()
+
+        wb = openpyxl.Workbook()
+        ws_stamps = wb.active
+        ws_stamps.title = "المدرسين"
+        ws_stamps.append(["اسم المدرس", "رقم الهاتف", "المذكرة"])
+        ws_stamps.append(["أ/ سيف", "01000000001", "مذكرة افتراضية"])
+
+        ws_coins = wb.create_sheet("شحن الكوينز")
+        ws_coins.append(["رقم الهاتف", "الإيميل", "الاسم (اختياري)", "شحن كوينز", "سبب الشحن"])
+        ws_coins.append(["01077778888", "", "", 50, "مكافأة دفعة"])
+        ws_coins.append(["", "coin_u2@zpact.test", "", 30, "شحن يدوي إكسيل"])
+        ws_coins.append(["01999999999", "", "غير موجود", 20, ""])
+        buf = io.BytesIO()
+        wb.save(buf)
+        xbytes = buf.getvalue()
+
+        # parse_uploaded_batch_file لا يخلط ورقة شحن الكوينز مع صفوف الختم
+        stamps, _ = parse_uploaded_batch_file("coins_batch.xlsx", xbytes, is_admin=True)
+        self.assertEqual(len(stamps), 1)
+        self.assertEqual(stamps[0]["teacher_name"], "أ/ سيف")
+
+        # parse_coins_recharges_from_file يستخرج صفوف الشحن بدقة
+        coin_rows = parse_coins_recharges_from_file("coins_batch.xlsx", xbytes, is_admin=True)
+        self.assertEqual(len(coin_rows), 3)
+
+        prev_res = self.client.post(
+            "/api/internal/admin/coins/preview-batch",
+            headers=self.headers,
+            json={"items": coin_rows},
+        )
+        self.assertEqual(prev_res.status_code, 200, prev_res.text)
+        pdata = prev_res.json()
+        self.assertEqual(pdata["matched_count"], 2)
+        self.assertEqual(pdata["unmatched_count"], 1)
+        self.assertEqual(pdata["total_coins"], 80.0)
+
+        app_res = self.client.post(
+            "/api/internal/admin/coins/apply-batch",
+            headers=self.headers,
+            json={"items": pdata["matched"]},
+        )
+        self.assertEqual(app_res.status_code, 200, app_res.text)
+        adata = app_res.json()
+        self.assertEqual(adata["credited_count"], 2)
+
+        db = self.TestingSession()
+        try:
+            u1_db = db.query(User).filter(User.id == u1_id).first()
+            u2_db = db.query(User).filter(User.id == u2_id).first()
+            self.assertEqual(float(u1_db.coins), 75.0)
+            self.assertEqual(float(u2_db.coins), 40.0)
+            self.assertGreaterEqual(db.query(CoinTransaction).filter(CoinTransaction.user_id == u1_id).count(), 1)
+            self.assertGreaterEqual(db.query(Notification).filter(Notification.user_id == u2_id).count(), 1)
+        finally:
+            db.close()
+
 
 class TestAdminManagementAndPermissions(unittest.TestCase):
     """اختبارات إضافة المشرفين المساعدين وتحديد صلاحياتهم وعزل القوائم والتنفيذ."""

@@ -21,6 +21,17 @@ def create_layout(
 ):
     """إنشاء تنسيق أختام جديد لمادة معينة."""
     layout = crud.create_layout(db, data, creator_id=admin.id)
+    if data.layout_type != models.LayoutType.CUSTOM:
+        mat = crud.get_material(db, data.material_id)
+        if mat:
+            mat.layout_confirmed = True
+            db.commit()
+            db.refresh(mat)
+            try:
+                from app.routers.internal_bridge import handle_material_readiness_and_layout_events
+                handle_material_readiness_and_layout_events(db, mat, source_event="layout_saved")
+            except Exception:
+                pass
     return schemas.StampLayoutOut.model_validate(layout)
 
 
@@ -61,6 +72,17 @@ def update_layout(
     layout = crud.update_layout(db, layout_id, data)
     if not layout:
         raise HTTPException(status_code=404, detail="التنسيق غير موجود")
+    if layout.layout_type != models.LayoutType.CUSTOM:
+        mat = crud.get_material(db, layout.material_id)
+        if mat:
+            mat.layout_confirmed = True
+            db.commit()
+            db.refresh(mat)
+            try:
+                from app.routers.internal_bridge import handle_material_readiness_and_layout_events
+                handle_material_readiness_and_layout_events(db, mat, source_event="layout_saved")
+            except Exception:
+                pass
     return schemas.StampLayoutOut.model_validate(layout)
 
 

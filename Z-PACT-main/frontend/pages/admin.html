@@ -1972,7 +1972,7 @@
                     </div>
                 </div>
                 <div id="file-field" class="form-group">
-                    <label id="m-file-label" class="form-label">ملف PDF</label>
+                    <label id="m-file-label" class="form-label">ملف PDF (اختياري — اتركه فارغاً لوضع «قريباً / تشويق»)</label>
                     <div id="m-file-edit-hint" class="hidden" style="margin-bottom: 8px; padding: 8px 10px; border-radius: 8px; background: rgba(56,189,248,0.08); border: 1px solid rgba(56,189,248,0.28); font-size: 12px; line-height: 1.6; color: var(--text-secondary);">
                         <div id="m-current-file-info" style="font-weight: 600; color: var(--text-primary); margin-bottom: 2px;"></div>
                         <div>اختر ملف PDF جديداً فقط إذا أردت استبدال الملف الحالي؛ سيتم الحفاظ على نفس البيانات وأماكن وأحجام الأختام المحفوظة كما هي.</div>
@@ -2692,10 +2692,10 @@
             <td>
               <div style="color:#f59e0b; font-weight:700"><img src='/frontend/assets/zpact_coin.png' class='coin-icon' alt='Z'> ${m.price_coins}</div>
             </td>
-            <td>${m.total_pages || "—"}</td>
+            <td>${(m.is_coming_soon || m.has_pdf === false) ? '<span style="color:#fbbf24;font-weight:700">⏳ قريباً</span>' : (m.total_pages || "—")}</td>
             <td>
-              <span class="badge ${m.is_published ? 'badge-success' : 'badge-muted'}">
-                ${m.is_published ? 'منشور' : 'مسودة'}
+              <span class="badge ${(m.is_coming_soon || m.has_pdf === false) ? 'badge-warning' : (m.is_published ? 'badge-success' : 'badge-muted')}" style="${(m.is_coming_soon || m.has_pdf === false) ? 'background:rgba(245,158,11,0.16);color:#fcd34d;border:1px solid rgba(245,158,11,0.35);' : ''}">
+                ${(m.is_coming_soon || m.has_pdf === false) ? '⏳ قريباً (تشويق)' : (!m.layout_confirmed ? (m.is_published ? 'منشور • بانتظار الأختام' : 'مسودة • بانتظار الأختام') : (m.is_published ? 'منشور' : 'مسودة'))}
               </span>
             </td>
             <td>
@@ -2728,12 +2728,12 @@
         }
 
         window.openUploadModal = () => {
-            document.getElementById("m-modal-title").textContent = "رفع ملف جديد";
+            document.getElementById("m-modal-title").textContent = "رفع ملف أو إضافة تشويق (قريباً)";
             document.getElementById("material-form").reset();
             document.getElementById("m-id").value = "";
-            document.getElementById("m-file-label").textContent = "ملف PDF";
+            document.getElementById("m-file-label").textContent = "ملف PDF (اختياري — اتركه فارغاً لوضع «قريباً / تشويق»)";
             document.getElementById("m-file").value = "";
-            document.getElementById("m-file").required = true;
+            document.getElementById("m-file").required = false;
             document.getElementById("m-file-edit-hint").classList.add("hidden");
             document.getElementById("file-field").classList.remove("hidden");
             document.getElementById("material-modal").classList.add("show");
@@ -2750,12 +2750,14 @@
             document.getElementById("m-price").value = m.price;
             document.getElementById("m-price-coins").value = m.price_coins;
             document.getElementById("m-compress").checked = m.compression_enabled !== false;
-            document.getElementById("m-file-label").textContent = "استبدال ملف PDF (اختياري)";
+            document.getElementById("m-file-label").textContent = (m.is_coming_soon || m.has_pdf === false)
+                ? "رفع ملف الـ PDF للمذكرة (لتحويلها من قريباً إلى متاحة)"
+                : "استبدال ملف PDF (اختياري)";
             document.getElementById("m-file").value = "";
             document.getElementById("m-file").required = false;
-            document.getElementById("m-current-file-info").textContent = m.total_pages
-                ? `الملف الحالي: ${m.total_pages} صفحة`
-                : "الملف الحالي محفوظ على السيرفر";
+            document.getElementById("m-current-file-info").textContent = (m.is_coming_soon || m.has_pdf === false)
+                ? "الحالة الحالية: قريباً (تشويق) — لم يُرفع ملف PDF بعد"
+                : (m.total_pages ? `الملف الحالي: ${m.total_pages} صفحة` : "الملف الحالي محفوظ على السيرفر");
             document.getElementById("m-file-edit-hint").classList.remove("hidden");
             document.getElementById("file-field").classList.remove("hidden");
             document.getElementById("material-modal").classList.add("show");
@@ -2816,12 +2818,17 @@
                         "success"
                     );
                 } else {
-                    if (!pdfFile) {
-                        throw new Error("يرجى اختيار ملف PDF أولاً");
+                    if (pdfFile) {
+                        formData.append("pdf_file", pdfFile);
+                    } else {
+                        formData.append("is_coming_soon", "true");
+                        formData.append("is_published", "true");
                     }
-                    formData.append("pdf_file", pdfFile);
                     await materialsAPI.upload(formData);
-                    showToast("تم رفع الملف بنجاح", "success");
+                    showToast(
+                        pdfFile ? "تم رفع الملف بنجاح" : "⏳ تم إضافة المذكرة كـ (قريباً / تشويق) بنجاح",
+                        "success"
+                    );
                 }
                 closeModal('material-modal');
                 loadMaterials();
@@ -3894,6 +3901,11 @@
         
         let currentMaterialIdForLayout = null;
         window.openDesigner = (id) => {
+            const mat = (typeof materials !== "undefined" ? materials : []).find(x => x.id === id);
+            if (mat && (mat.is_coming_soon || mat.has_pdf === false)) {
+                showToast("⏳ يرجى رفع ملف الـ PDF أولاً عبر زر التعديل (✏️) قبل تحديد أماكن الأختام", "warning");
+                return;
+            }
             currentMaterialIdForLayout = id;
             document.getElementById('choose-layout-modal').style.display = 'flex';
         };

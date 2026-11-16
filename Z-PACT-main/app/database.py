@@ -114,6 +114,8 @@ def patch_database_schema():
             ("users", "recovery_password_hash", "VARCHAR(255)"),
             ("users", "admin_label", "TEXT"),
             ("materials", "sender_commission", "REAL"),
+            ("materials", "is_coming_soon", "BOOLEAN DEFAULT 0"),
+            ("materials", "layout_confirmed", "BOOLEAN DEFAULT 0"),
             ("bot_orders", "receiver_wallet_phone", "TEXT"),
             ("bot_orders", "bundle_code", "TEXT"),
             ("bot_orders", "processed_by_sender_id", "INTEGER"),
@@ -126,16 +128,29 @@ def patch_database_schema():
             ("bot_orders", "series_name", "TEXT"),
         ]
         
+        just_added_layout_confirmed = False
         for table, column, col_type in columns_to_add:
             try:
                 cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
                 logger.info(f"✓ [Patch] Added column {column} to table {table}")
+                if table == "materials" and column == "layout_confirmed":
+                    just_added_layout_confirmed = True
             except sqlite3.OperationalError as e:
                 # إذا كان العمود موجوداً بالفعل سيظهر خطأ، نقوم بتجاهله
                 if "duplicate column name" in str(e).lower() or "already exists" in str(e).lower():
                     pass
                 else:
                     logger.warning(f"⚠️ [Patch Warning] Could not add column {column}: {e}")
+
+        if just_added_layout_confirmed:
+            try:
+                cursor.execute(
+                    "UPDATE materials SET layout_confirmed = 1 "
+                    "WHERE COALESCE(original_pdf_path, '') != '' "
+                    "AND EXISTS (SELECT 1 FROM stamp_layouts WHERE stamp_layouts.material_id = materials.id)"
+                )
+            except Exception as e:
+                logger.warning(f"⚠️ [Patch Warning] Could not backfill layout_confirmed: {e}")
         
         # 2. إنشاء فهارس السرعة الفائقة لقاعدة البيانات لتسريع الاستعلامات 10 أضعاف
         indexes_to_create = [
@@ -161,6 +176,7 @@ def patch_database_schema():
             "CREATE INDEX IF NOT EXISTS idx_users_approval ON users(approval_status)",
             "CREATE INDEX IF NOT EXISTS idx_bot_orders_bundle ON bot_orders(bundle_code)",
             "CREATE INDEX IF NOT EXISTS idx_bot_orders_sender ON bot_orders(processed_by_sender_id)",
+            "CREATE INDEX IF NOT EXISTS idx_mat_teacher_entries_mat_status ON material_teacher_entries(material_id, status)",
         ]
         for idx_sql in indexes_to_create:
             try:

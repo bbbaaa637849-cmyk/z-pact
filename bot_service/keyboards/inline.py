@@ -207,23 +207,50 @@ def get_admin_material_item_keyboard(
     is_published: bool,
     has_frame: bool = False,
     user_id: Optional[int] = None,
+    is_coming_soon: bool = False,
+    layout_confirmed: bool = True,
+    waiting_count: int = 0,
+    completed_count: int = 0,
 ) -> InlineKeyboardMarkup:
-    """أزرار التحكم بمذكرة محددة للأدمن بحسب صلاحياته (السعر، النشر، الخطوط، الإطار، المعاينة)"""
+    """أزرار التحكم بمذكرة محددة للأدمن بحسب صلاحياته (السعر، النشر، الخطوط، الإطار، المعاينة، وسجل المدرسين)"""
     can_fonts = _has_any_perm(user_id, "studio_fonts")
     can_materials = _has_any_perm(user_id, "materials")
+    can_batch = _has_any_perm(user_id, "batch_vip")
     rows = []
 
-    if can_fonts:
+    if is_coming_soon and can_materials:
+        rows.append([
+            InlineKeyboardButton(text="📤 رفع ملف الـ PDF وتجهيزها الآن", callback_data=f"adm_mat_replace_pdf:{material_id}")
+        ])
+
+    if not is_coming_soon and can_fonts:
         rows.append([
             InlineKeyboardButton(text="🔤 ضبط الخط والأحجام والموقع", callback_data=f"adm_mat_font:{material_id}"),
             InlineKeyboardButton(text="👁️ معاينة صفحة 1", callback_data=f"adm_mat_preview:{material_id}"),
         ])
-    if can_materials:
+        if waiting_count > 0 and not layout_confirmed:
+            rows.append([
+                InlineKeyboardButton(
+                    text=f"✅ تأكيد الأختام وإطلاق الانتظار ({waiting_count})",
+                    callback_data=f"adm_mat_confirm_wl:{material_id}",
+                )
+            ])
+
+    if (waiting_count > 0 or completed_count > 0) and (can_batch or can_materials or can_fonts):
+        total_roster = waiting_count + completed_count
+        rows.append([
+            InlineKeyboardButton(
+                text=f"👥 سجل المدرسين والانتظار ({total_roster})",
+                callback_data=f"adm_mat_roster:{material_id}",
+            )
+        ])
+
+    if can_materials and not is_coming_soon:
         rows.append([
             InlineKeyboardButton(text="📥 تحميل الأصل", callback_data=f"adm_mat_dl_orig:{material_id}"),
             InlineKeyboardButton(text="📄 استبدال ملف الـ PDF", callback_data=f"adm_mat_replace_pdf:{material_id}"),
         ])
-    if can_fonts:
+    if can_fonts and not is_coming_soon:
         frame_row = [InlineKeyboardButton(text="🖼️ رفع/تغيير إطار الصفحة", callback_data=f"adm_mat_frame:{material_id}")]
         if has_frame:
             frame_row.append(InlineKeyboardButton(text="🧹 حذف الإطار", callback_data=f"adm_mat_frame_del:{material_id}"))

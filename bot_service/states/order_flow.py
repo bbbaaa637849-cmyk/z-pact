@@ -72,6 +72,11 @@ class AdminBatchStampStates(StatesGroup):
     waiting_batch_text = State()
     waiting_batch_logo = State()
 
+
+class AdminMaterialRosterStates(StatesGroup):
+    """حالات استعراض واختيار مدرسين محددين لإعادة الختم من سجل المذكرة"""
+    selecting_teachers = State()
+
 class AdminBroadcastStates(StatesGroup):
     """حالات الإذاعة العامة لجميع المدرسين"""
     waiting_broadcast_message = State()

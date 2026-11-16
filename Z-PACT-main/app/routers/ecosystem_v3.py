@@ -1872,7 +1872,12 @@ def get_sender_workspace(
     sender: SenderAgent = Depends(require_approved_sender),
     db: Session = Depends(get_db),
 ):
-    materials = db.query(Material).filter(Material.is_published == True).order_by(Material.id.desc()).all()
+    materials = (
+        db.query(Material)
+        .filter(Material.is_published == True, Material.is_coming_soon == False)
+        .order_by(Material.id.desc())
+        .all()
+    )
     catalog = []
     for m in materials:
         price_egp = float(m.price or m.price_coins or 0.0)
@@ -1998,6 +2003,8 @@ def sender_create_direct_bundle(
     materials = db.query(Material).filter(Material.id.in_(mat_ids), Material.is_published == True).all()
     if len(materials) != len(mat_ids):
         raise HTTPException(status_code=404, detail="بعض المذكرات المختارة غير متاحة حالياً")
+    if any(bool(getattr(m, "is_coming_soon", False)) or not m.has_pdf for m in materials):
+        raise HTTPException(status_code=400, detail="⏳ بعض المذكرات المختارة في مرحلة التشويق (قريباً) ولم تُرفع بعد")
 
     receipt_path = save_uploaded_receipt(receipt_image)
     wm_logo_path = save_uploaded_watermark_logo(watermark_logo)
@@ -2382,6 +2389,8 @@ def create_multi_material_bundle_checkout(
     materials = db.query(Material).filter(Material.id.in_(mat_ids), Material.is_published == True).all()
     if len(materials) != len(mat_ids):
         raise HTTPException(status_code=404, detail="بعض المذكرات المختارة غير متوفرة")
+    if any(bool(getattr(m, "is_coming_soon", False)) or not m.has_pdf for m in materials):
+        raise HTTPException(status_code=400, detail="⏳ بعض المذكرات المختارة في مرحلة التشويق (قريباً) ولم تُرفع بعد")
 
     bot_sys_user = _get_or_create_bot_system_user(db)
     target_buyer_id = jwt_user.id if jwt_user else bot_sys_user.id

@@ -623,5 +623,118 @@ class BridgeClient:
                 logger.error(f"❌ [Bridge Exception] replace_material_pdf: {e}")
                 return {"ok": False, "error": str(e)}
 
+    # -------------------------------------------------------------
+    # 10. المذكرات القادمة (تشويق)، قوائم الانتظار، سجل المدرسين، وشحن الكوينز
+    # -------------------------------------------------------------
+    async def upsert_upcoming_material(self, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        url = f"{self.base_url}/internal/admin/materials/upsert-upcoming"
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            try:
+                res = await client.post(url, headers=self.headers, json=payload)
+                return res.json() if res.status_code == 200 else None
+            except Exception as e:
+                logger.error(f"❌ [Bridge Exception] upsert_upcoming_material: {e}")
+                return None
+
+    async def queue_material_teacher_entries(
+        self,
+        material_id: int,
+        entries: List[Dict[str, Any]],
+        status: str = "waiting_release",
+        telegram_chat_id: Optional[str] = None,
+        telegram_user_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        url = f"{self.base_url}/internal/admin/materials/{material_id}/teacher-entries/queue"
+        payload = {
+            "entries": entries,
+            "status": status,
+            "telegram_chat_id": telegram_chat_id,
+            "telegram_user_id": telegram_user_id,
+        }
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            try:
+                res = await client.post(url, headers=self.headers, json=payload)
+                return res.json() if res.status_code == 200 else None
+            except Exception as e:
+                logger.error(f"❌ [Bridge Exception] queue_material_teacher_entries: {e}")
+                return None
+
+    async def get_material_teacher_entries(
+        self,
+        material_id: int,
+        status: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        url = f"{self.base_url}/internal/admin/materials/{material_id}/teacher-entries"
+        params = {"status": status} if status else {}
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            try:
+                res = await client.get(url, headers=self.headers, params=params)
+                return res.json() if res.status_code == 200 else None
+            except Exception as e:
+                logger.error(f"❌ [Bridge Exception] get_material_teacher_entries: {e}")
+                return None
+
+    async def mark_teacher_entry(
+        self,
+        entry_id: int,
+        status: str,
+        last_order_code: Optional[str] = None,
+        error_message: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        url = f"{self.base_url}/internal/admin/teacher-entries/{entry_id}/mark"
+        payload = {"status": status, "last_order_code": last_order_code, "error_message": error_message}
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                res = await client.post(url, headers=self.headers, json=payload)
+                return res.json() if res.status_code == 200 else None
+            except Exception as e:
+                logger.error(f"❌ [Bridge Exception] mark_teacher_entry: {e}")
+                return None
+
+    async def confirm_material_layout(
+        self,
+        material_id: int,
+        trigger_waitlist: bool = True,
+    ) -> Optional[Dict[str, Any]]:
+        url = f"{self.base_url}/internal/admin/materials/{material_id}/confirm-layout"
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            try:
+                res = await client.post(url, headers=self.headers, json={"trigger_waitlist": trigger_waitlist})
+                return res.json() if res.status_code == 200 else None
+            except Exception as e:
+                logger.error(f"❌ [Bridge Exception] confirm_material_layout: {e}")
+                return None
+
+    async def get_ready_waitlists(self) -> List[Dict[str, Any]]:
+        url = f"{self.base_url}/internal/admin/waitlist/ready"
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                res = await client.get(url, headers=self.headers)
+                if res.status_code == 200:
+                    return res.json().get("ready", [])
+                return []
+            except Exception:
+                return []
+
+    async def preview_batch_coins(self, items: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        url = f"{self.base_url}/internal/admin/coins/preview-batch"
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            try:
+                res = await client.post(url, headers=self.headers, json={"items": items})
+                return res.json() if res.status_code == 200 else None
+            except Exception as e:
+                logger.error(f"❌ [Bridge Exception] preview_batch_coins: {e}")
+                return None
+
+    async def apply_batch_coins(self, items: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        url = f"{self.base_url}/internal/admin/coins/apply-batch"
+        async with httpx.AsyncClient(timeout=25.0) as client:
+            try:
+                res = await client.post(url, headers=self.headers, json={"items": items})
+                return res.json() if res.status_code == 200 else None
+            except Exception as e:
+                logger.error(f"❌ [Bridge Exception] apply_batch_coins: {e}")
+                return None
+
 
 bridge_client = BridgeClient()

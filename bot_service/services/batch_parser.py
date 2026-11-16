@@ -86,6 +86,33 @@ _HEADER_ALIASES: Dict[str, Tuple[str, ...]] = {
     "font_size": (
         "حجم الخط", "حجم", "font size", "font_size", "size",
     ),
+    "material_description": (
+        "وصف المذكره", "الوصف", "وصف", "التفاصيل", "تفاصيل المذكره",
+        "description", "desc", "booklet description", "material description",
+    ),
+    "material_price": (
+        "سعر المذكره", "السعر", "سعر", "سعر الجنيه", "price", "egp price", "material price",
+    ),
+    "material_price_coins": (
+        "سعر الكوينز", "كوينز المذكره", "سعر العملات", "عملات المذكره",
+        "price_coins", "price coins", "booklet coins",
+    ),
+    "material_tag": (
+        "التصنيف", "القسم", "الشعبه", "تاج", "التاج", "category", "tag",
+    ),
+    "add_coins": (
+        "شحن كوينز", "اضافه كوينز", "اضافة كوينز", "شحن رصيد", "اضافه رصيد",
+        "كوينز مضافه", "العملات المضافه", "add_coins", "add coins", "recharge",
+    ),
+    "user_email": (
+        "الايميل", "البريد", "البريد الالكتروني", "email", "mail", "user email",
+    ),
+    "user_id": (
+        "معرف المستخدم", "رقم المستخدم", "user_id", "user id",
+    ),
+    "coins_note": (
+        "ملاحظه الشحن", "سبب الشحن", "السبب", "ملاحظه", "note", "reason",
+    ),
 }
 
 _NORMALIZED_HEADER_LOOKUP: Dict[str, str] = {}
@@ -209,12 +236,26 @@ def _row_to_entry(
         if not sval or _is_skip_token(sval):
             continue
         if field in ("phone", "phone_2"):
+            if field == "phone" and "@" in sval and "user_email" not in entry:
+                entry["user_email"] = sval
+                continue
             norm_p = normalize_phone_value(val)
             if norm_p:
                 entry[field] = norm_p
-        elif field == "font_size":
+        elif field in ("font_size", "material_price", "material_price_coins", "add_coins"):
             try:
-                entry[field] = float(str(val).translate(ARABIC_DIGITS_MAP).strip())
+                num_str = re.sub(r"[^\d.\-]", "", str(val).translate(ARABIC_DIGITS_MAP).strip())
+                if num_str:
+                    entry[field] = float(num_str)
+            except ValueError:
+                pass
+        elif field == "user_id":
+            try:
+                num_str = str(val).translate(ARABIC_DIGITS_MAP).strip()
+                if num_str.endswith(".0"):
+                    num_str = num_str[:-2]
+                if num_str.isdigit():
+                    entry[field] = int(num_str)
             except ValueError:
                 pass
         elif field == "font_family":
@@ -273,7 +314,35 @@ def _infer_positional_col_map(row: List[Any]) -> Dict[int, str]:
     return {0: "teacher_name", 1: "phone", 2: "material_ref", 3: "series_name", 4: "watermark_text", 5: "phone_2"}
 
 
-def _extract_from_matrix(rows: List[List[Any]], is_admin: bool = False) -> List[Dict[str, Any]]:
+def _reconcile_ambiguous_coin_headers(col_map: Dict[int, str], row: List[Any], is_coin_sheet: bool = False) -> Dict[int, str]:
+    """تمييز عمود 'الكوينز' تلقائياً بين سعر المذكرة (price_coins) وشحن محفظة المستخدم (add_coins)."""
+    updated = dict(col_map)
+    has_material_context = any(v in ("material_ref", "material_description", "series_name") for v in updated.values())
+    for idx, cell in enumerate(row):
+        norm = normalize_arabic_text(str(cell or ""))
+        if norm in ("كوينز", "الكوينز", "coins"):
+            if is_coin_sheet or not has_material_context:
+                updated[idx] = "add_coins"
+            elif "material_price_coins" not in updated.values():
+                updated[idx] = "material_price_coins"
+    return updated
+
+
+def _is_pure_coin_recharge_row(entry: Dict[str, Any]) -> bool:
+    """التحقق مما إذا كان الصف خاصاً بشحن الكوينز فقط دون بيانات مذكرة أو ختم."""
+    has_coin = entry.get("add_coins") is not None
+    has_stamp_or_mat = any(
+        entry.get(k)
+        for k in ("material_ref", "series_name", "watermark_text", "watermark_logo_path", "material_description", "material_price", "material_price_coins")
+    )
+    return bool(has_coin and not has_stamp_or_mat)
+
+
+def _extract_from_matrix(
+    rows: List[List[Any]],
+    is_admin: bool = False,
+    is_coin_sheet: bool = False,
+) -> List[Dict[str, Any]]:
     """استخراج قائمة المدرسين من مصفوفة صفوف (تُستخدم للإكسيل وجداول الوورد وCSV)."""
     if not rows:
         return []
@@ -299,9 +368,14 @@ def _extract_from_matrix(rows: List[List[Any]], is_admin: bool = False) -> List[
                 candidate_map[c_idx] = mapped
                 if _map_header_cell(cell, allow_fuzzy=False) is not None:
                     exact_matches += 1
+        candidate_map = _reconcile_ambiguous_coin_headers(candidate_map, list(row), is_coin_sheet=is_coin_sheet)
         has_stamp_col = any(
             k in candidate_map.values()
-            for k in ("teacher_name", "phone", "phone_2", "material_ref", "series_name", "watermark_text")
+            for k in (
+                "teacher_name", "phone", "phone_2", "material_ref", "series_name",
+                "watermark_text", "material_description", "material_price",
+                "material_price_coins", "add_coins", "user_email", "user_id",
+            )
         )
         if len(candidate_map) >= 2 and has_stamp_col:
             best_col_map = candidate_map
@@ -349,8 +423,11 @@ def _extract_from_matrix(rows: List[List[Any]], is_admin: bool = False) -> List[
     return entries
 
 
+_COIN_SHEET_KEYWORDS = ("شحن الكوينز", "اضافه كوينز", "اضافة كوينز", "شحن رصيد", "كوينز", "coins")
+
+
 def parse_excel_bytes(file_bytes: bytes, is_admin: bool = False) -> List[Dict[str, Any]]:
-    """استخراج بيانات المدرسين من ملف Excel (.xlsx)."""
+    """استخراج بيانات المدرسين والمذكرات من ملف Excel (.xlsx)."""
     import openpyxl
 
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True, read_only=True)
@@ -360,11 +437,14 @@ def parse_excel_bytes(file_bytes: bytes, is_admin: bool = False) -> List[Dict[st
             norm_sheet = normalize_arabic_text(sheet_name)
             if any(skip in norm_sheet for skip in ("تعليمات", "instruction", "دليل", "notes")):
                 continue
+            if any(cs in norm_sheet for cs in ("شحن الكوينز", "اضافه كوينز", "شحن رصيد", "coins")):
+                continue
             ws = wb[sheet_name]
             matrix = [list(row) for row in ws.iter_rows(values_only=True)]
-            parsed = _extract_from_matrix(matrix, is_admin=is_admin)
-            if parsed:
-                all_entries.extend(parsed)
+            parsed = _extract_from_matrix(matrix, is_admin=is_admin, is_coin_sheet=False)
+            for p in parsed:
+                if not _is_pure_coin_recharge_row(p):
+                    all_entries.append(p)
     finally:
         wb.close()
     return all_entries
@@ -426,12 +506,16 @@ def parse_text_teacher_entries(raw_text: str, is_admin: bool = False) -> List[Di
                 val = v_raw.strip()
                 if mapped in ("phone", "phone_2"):
                     val = normalize_phone_value(val)
-                elif mapped == "font_size":
+                elif mapped in ("font_size", "material_price", "material_price_coins", "add_coins"):
                     try:
-                        val = float(val.translate(ARABIC_DIGITS_MAP))
+                        num_str = re.sub(r"[^\d.\-]", "", val.translate(ARABIC_DIGITS_MAP).strip())
+                        val = float(num_str) if num_str else None
                     except ValueError:
                         val = None
-                if val:
+                elif mapped == "user_id":
+                    num_str = val.translate(ARABIC_DIGITS_MAP).strip()
+                    val = int(num_str) if num_str.isdigit() else None
+                if val is not None and val != "":
                     # لو الحقل اتكرر في نفس الكتلة نبدأ عنصراً جديداً
                     if mapped in current_block and stamp_settings.has_any_available_stamp_data(current_block):
                         _flush_block()
@@ -503,17 +587,89 @@ def parse_uploaded_batch_file(
     is_admin: bool = False,
 ) -> Tuple[List[Dict[str, Any]], str]:
     """تحديد نوع الملف وتحليله وإرجاع (قائمة المدرسين, نوع الملف المقروء)."""
+    if field_list_placeholder := False:
+        pass
     ext = ("." + filename.rsplit(".", 1)[-1].lower()) if "." in (filename or "") else ""
     if ext == ".xlsx":
         return parse_excel_bytes(file_bytes, is_admin=is_admin), "Excel (.xlsx)"
     if ext == ".csv":
-        return parse_csv_bytes(file_bytes, is_admin=is_admin), "CSV (.csv)"
+        return [r for r in parse_csv_bytes(file_bytes, is_admin=is_admin) if not _is_pure_coin_recharge_row(r)], "CSV (.csv)"
     if ext == ".docx":
-        return parse_word_bytes(file_bytes, is_admin=is_admin), "Word (.docx)"
+        return [r for r in parse_word_bytes(file_bytes, is_admin=is_admin) if not _is_pure_coin_recharge_row(r)], "Word (.docx)"
     if ext == ".txt":
         text = file_bytes.decode("utf-8-sig", errors="replace")
-        return parse_text_teacher_entries(text, is_admin=is_admin), "Text (.txt)"
+        return [r for r in parse_text_teacher_entries(text, is_admin=is_admin) if not _is_pure_coin_recharge_row(r)], "Text (.txt)"
     raise ValueError(f"صيغة الملف غير مدعومة ({ext or 'unknown'}). استخدم .xlsx أو .docx أو .csv")
+
+
+def parse_coins_recharges_from_file(filename: str, file_bytes: bytes, is_admin: bool = True) -> List[Dict[str, Any]]:
+    """استخراج طلبات شحن الكوينز للمستخدمين من ملف Excel أو Word أو CSV أو نص."""
+    ext = ("." + filename.rsplit(".", 1)[-1].lower()) if "." in (filename or "") else ""
+    rows: List[Dict[str, Any]] = []
+
+    if ext == ".xlsx":
+        import openpyxl
+        wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True, read_only=True)
+        try:
+            for sheet_name in wb.sheetnames:
+                norm_sheet = normalize_arabic_text(sheet_name)
+                if any(skip in norm_sheet for skip in ("تعليمات", "instruction", "دليل", "notes")):
+                    continue
+                is_coin_sh = any(cs in norm_sheet for cs in ("شحن الكوينز", "اضافه كوينز", "شحن رصيد", "coins"))
+                ws = wb[sheet_name]
+                matrix = [list(row) for row in ws.iter_rows(values_only=True)]
+                parsed = _extract_from_matrix(matrix, is_admin=is_admin, is_coin_sheet=is_coin_sh)
+                rows.extend(parsed)
+        finally:
+            wb.close()
+    elif ext == ".csv":
+        rows = parse_csv_bytes(file_bytes, is_admin=is_admin)
+    elif ext == ".docx":
+        rows = parse_word_bytes(file_bytes, is_admin=is_admin)
+    elif ext == ".txt":
+        rows = parse_text_teacher_entries(file_bytes.decode("utf-8-sig", errors="replace"), is_admin=is_admin)
+
+    coin_items: List[Dict[str, Any]] = []
+    for r in rows:
+        amt = r.get("add_coins")
+        if amt is None:
+            continue
+        try:
+            amt_val = float(amt)
+        except (TypeError, ValueError):
+            continue
+        if amt_val <= 0:
+            continue
+        has_ident = any(r.get(k) for k in ("phone", "user_email", "user_id", "teacher_name"))
+        if not has_ident:
+            continue
+        coin_items.append({
+            "phone": r.get("phone"),
+            "user_email": r.get("user_email"),
+            "user_id": r.get("user_id"),
+            "teacher_name": r.get("teacher_name"),
+            "add_coins": amt_val,
+            "coins_note": r.get("coins_note"),
+        })
+    return coin_items
+
+
+def parse_coins_recharges_from_text(raw_text: str) -> List[Dict[str, Any]]:
+    """استخراج طلبات شحن الكوينز من النص المباشر."""
+    rows = parse_text_teacher_entries(raw_text, is_admin=True)
+    return [
+        {
+            "phone": r.get("phone"),
+            "user_email": r.get("user_email"),
+            "user_id": r.get("user_id"),
+            "teacher_name": r.get("teacher_name"),
+            "add_coins": float(r["add_coins"]),
+            "coins_note": r.get("coins_note"),
+        }
+        for r in rows
+        if r.get("add_coins") is not None and float(r.get("add_coins") or 0) > 0
+        and any(r.get(k) for k in ("phone", "user_email", "user_id", "teacher_name"))
+    ]
 
 
 def match_material_by_ref(ref: Any, materials: List[Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], str]:
@@ -580,14 +736,17 @@ def build_excel_template_bytes(materials: Optional[List[Dict[str, Any]]] = None)
     ws.views.sheetView[0].rightToLeft = True
 
     headers = [
-        "اسم المدرس",      # متاح/اختياري للأدمن
-        "رقم الهاتف",      # متاح/اختياري للأدمن
-        "المذكرة",         # متاح (أو يُختار افتراضي من البوت)
-        "اسم السلسلة",     # متاح/اختياري
-        "العلامة المائية", # اختياري
-        "هاتف 2",          # اختياري
-        "الخط",            # اختياري (cairo / tahoma / arial / naskh / arabtype)
-        "حجم الخط",        # اختياري (رقم مثلاً 16)
+        "اسم المدرس",         # متاح/اختياري للأدمن
+        "رقم الهاتف",         # متاح/اختياري للأدمن
+        "المذكرة",            # اسم المذكرة (إن لم تكن مرفوعة تُضاف كـ قريباً/تشويق)
+        "وصف المذكرة",        # اختياري — يكفي كتابته مع أول مدرس فقط
+        "السعر",              # اختياري — إذا تُرك فارغاً يأخذ سعر المنصة الحالي
+        "سعر الكوينز",        # اختياري — سعر المذكرة بالكوينز
+        "اسم السلسلة",        # متاح/اختياري
+        "العلامة المائية",    # اختياري
+        "هاتف 2",             # اختياري
+        "الخط",               # اختياري
+        "حجم الخط",           # اختياري
     ]
 
     header_fill = PatternFill(start_color="0F172A", end_color="0F172A", fill_type="solid")
@@ -602,36 +761,47 @@ def build_excel_template_bytes(materials: Optional[List[Dict[str, Any]]] = None)
 
     first_mat_title = materials[0]["title"] if materials else "اسم المذكرة أو رقمها"
     sample_rows = [
-        ["د. أحمد محمد علي", "01012345678", first_mat_title, "سلسلة التفوق", "نسخة خاصة بالمدرس", "", "cairo", ""],
-        ["أ. سارة محمود", "01198765432", first_mat_title, "", "", "01200001111", "", ""],
+        ["د. أحمد محمد علي", "01012345678", first_mat_title, "", "", "", "سلسلة التفوق", "نسخة خاصة بالمدرس", "", "cairo", ""],
+        ["أ. سارة محمود", "01198765432", first_mat_title, "", "", "", "", "", "01200001111", "", ""],
     ]
 
     for r_offset, row_vals in enumerate(sample_rows, start=2):
         for c_idx, val in enumerate(row_vals, start=1):
             c = ws.cell(row=r_offset, column=c_idx, value=val)
             # تنسيق أعمدة الهواتف كنص للحفاظ على الصفر البادئ في الإكسيل
-            if c_idx in (2, 6):
+            if c_idx in (2, 9):
                 c.number_format = "@"
             c.alignment = Alignment(horizontal="center", vertical="center")
 
-    widths = [26, 18, 28, 22, 24, 18, 14, 12]
+    widths = [24, 18, 28, 32, 14, 15, 22, 24, 18, 12, 12]
     for idx, w in enumerate(widths, start=1):
         col_letter = openpyxl.utils.get_column_letter(idx)
         ws.column_dimensions[col_letter].width = w
 
-    # ورقة ثانية بالتعليمات والمذكرات المتوفرة حالياً
+    # ورقة ثانية: شحن الكوينز الجماعي للمستخدمين
+    ws_coins = wb.create_sheet("شحن الكوينز")
+    ws_coins.views.sheetView[0].rightToLeft = True
+    coin_headers = ["رقم الهاتف", "الإيميل", "الاسم (اختياري)", "شحن كوينز", "سبب الشحن"]
+    for col_idx, h in enumerate(coin_headers, start=1):
+        cell = ws_coins.cell(row=1, column=col_idx, value=h)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    for idx, w in enumerate([18, 28, 24, 16, 30], start=1):
+        ws_coins.column_dimensions[openpyxl.utils.get_column_letter(idx)].width = w
+
+    # ورقة ثالثة بالتعليمات والمذكرات المتوفرة حالياً
     ws_info = wb.create_sheet("تعليمات")
     ws_info.views.sheetView[0].rightToLeft = True
     info_lines = [
         ("مرونة البيانات", "يكفي إدخال أي بيانات متوفرة (الاسم + الرقم، الاسم + السلسلة، الاسم فقط، المذكرة/السلسلة فقط، أو الرقم فقط) — وللأدمن كل الحقول اختيارية بالكامل"),
-        ("اسم المدرس", "الاسم الذي سيُختم به داخل المذكرة (اختياري عند توفر بيان آخر أو للأدمن)"),
+        ("حجز مذكرة قادمة (تشويق)", "لو كتبت اسم مذكرة جديدة لم تُرفع بعد، تُنشأ تلقائياً كـ (قريباً / تشويق) على الموقع، ويُحفظ المدرسون في قائمة الانتظار حتى ترفع الـ PDF وتضبط الأختام"),
+        ("الوصف والسعر لمرة واحدة", "اكتب وصف المذكرة والسعر/سعر الكوينز في صف أول مدرس فقط ولا يلزم تكرارها لباقي المدرسين، ولو تركت السعر فارغاً يستخدم سعر المنصة الحالي"),
+        ("شحن الكوينز من الإكسيل", "استخدم ورقة (شحن الكوينز) لشحن رصيد عدة مستخدمين دفعة واحدة برقم الهاتف أو الإيميل أو الاسم"),
         ("رقم الهاتف", "يُفضّل وضع خلية الهاتف كنص Text؛ وإن كُتب رقم بدون 0 يعالجه البوت تلقائياً (اختياري للأدمن)"),
-        ("المذكرة", "اسم المذكرة أو رقمها (ID)، أو اتركه فارغاً واختر مذكرة موحدة من البوت"),
-        ("اسم السلسلة", "مثال: سلسلة التفوق (يمكن الاكتفاء به كبيان للختم)"),
         ("العلامة المائية", "اكتب نص العلامة المائية، أو اكتب كلمة (لوجو) أو (صورة) لإرفاق صورة لوجو خاص بالمدرس من البوت، أو اتركه فارغاً"),
         ("هاتف 2", "رقم إضافي يظهر بالتبادل في الصفحات الداخلية"),
-        ("الخط", "cairo / tahoma / arial / simplified / traditional / arabtype / naskh / times"),
-        ("حجم الخط", "رقم مثل 14 أو 16 أو 18"),
+        ("الخط وحجم الخط", "الخط مثل: cairo / tahoma / arial / naskh — وحجم الخط رقم مثل 14 أو 16"),
     ]
     for r_idx, (k, v) in enumerate(info_lines, start=1):
         ws_info.cell(row=r_idx, column=1, value=k)
@@ -660,6 +830,17 @@ def filter_usable_materials(materials: Optional[List[Dict[str, Any]]]) -> List[D
     usable = [
         m for m in raw_list
         if m.get("file_exists", True) and not str(m.get("title", "")).startswith("Test Material")
+    ]
+    return usable or raw_list
+
+
+def filter_admin_materials(materials: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """تصفية مذكرات الإدارة مع الإبقاء على المذكرات القادمة (قريباً/تشويق) بجانب الجاهزة."""
+    raw_list = list(materials or [])
+    usable = [
+        m for m in raw_list
+        if (m.get("file_exists", True) or m.get("is_coming_soon", False))
+        and not str(m.get("title", "")).startswith("Test Material")
     ]
     return usable or raw_list
 
@@ -715,7 +896,14 @@ def build_materials_catalog_excel_bytes(
         is_pub = bool(m.get("is_published", True))
         pages = int(m.get("total_pages") or 0)
         price = float(m.get("price") or 0)
-        status_label = "منشورة ومضبوطة الأختام" if is_pub else "مسودة مخفية"
+        is_coming = bool(m.get("is_coming_soon", False))
+        layout_ok = bool(m.get("layout_confirmed", True))
+        if is_coming:
+            status_label = "⏳ قريباً (تشويق — بانتظار الـ PDF)"
+        elif not layout_ok:
+            status_label = "⏳ بانتظار ضبط وتأكيد الأختام"
+        else:
+            status_label = "منشورة ومضبوطة الأختام" if is_pub else "مسودة مخفية"
         orig_note = src_map.get(mid) or (m.get("description") or "خامة مسجلة في النظام")
 
         vals = [
@@ -804,11 +992,13 @@ def build_word_template_bytes(materials: Optional[List[Dict[str, Any]]] = None) 
             table.rows[r_i].cells[c_i].text = val
 
     doc.add_paragraph("")
-    doc.add_paragraph("ملاحظة: يمكنك أيضاً كتابة المدرسين بدون جدول بالشكل التالي داخل ملف الوورد:")
+    doc.add_paragraph("ملاحظة: يمكنك أيضاً كتابة المدرسين (أو حجز مذكرة قادمة بسعرها ووصفها من أول مدرس، أو شحن الكوينز) بدون جدول:")
     doc.add_paragraph(
         "الاسم: أ. خالد حسن\n"
         "الهاتف: 01099887766\n"
         f"المذكرة: {first_mat_title}\n"
+        "وصف المذكرة: مراجعة شاملة (اختياري — يكفي مع أول مدرس)\n"
+        "السعر: 100 (اختياري — لو فارغ يستخدم سعر المنصة)\n"
         "السلسلة: سلسلة الرواد\n"
         "العلامة المائية: لا للنشر"
     )

@@ -32,6 +32,7 @@ class RealTimeNotifier:
         self.bot = bot
         self.is_running = False
         self._processed_orders: Set[str] = set()
+        self._last_layout_alert_ts: dict[int, float] = {}
 
     async def start(self):
         """بدء تشغيل المستمع اللحظي ومراقب التسليم الاحتياطي"""
@@ -290,6 +291,67 @@ class RealTimeNotifier:
             )
             return
 
+        if event == "MATERIAL_WAITLIST_READY":
+            mid = int(data.get("material_id") or 0)
+            mtitle = html.escape(str(data.get("material_title") or f"#{mid}"))
+            wl_cnt = int(data.get("waiting_count") or 0)
+            if mid > 0:
+                await self._notify_all_admins(
+                    f"🚀 <b>اكتمل شرطا صدور المذكرة وتفعيل قائمة الانتظار تلقائياً!</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"📖 <b>المذكرة:</b> {mtitle} (<code>#{mid}</code>)\n"
+                    f"👥 <b>المدرسون المنتظرون:</b> <code>{wl_cnt}</code>\n\n"
+                    f"⚙️ جاري الآن ختم وإرسال الملفات تباعاً...",
+                    permission="batch_vip",
+                )
+                from bot_service.handlers.admin_studio import trigger_waitlist_release_once
+                asyncio.create_task(trigger_waitlist_release_once(self.bot, mid))
+            return
+
+        if event == "MATERIAL_PDF_NEEDS_LAYOUT":
+            mid = int(data.get("material_id") or 0)
+            mtitle = html.escape(str(data.get("material_title") or f"#{mid}"))
+            wl_cnt = int(data.get("waiting_count") or 0)
+            pages = int(data.get("total_pages") or 0)
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="🔤 ضبط وتأكيد أماكن الأختام الآن", callback_data=f"adm_mat_font:{mid}"),
+            ]])
+            await self._notify_all_admins(
+                f"📄 <b>تم رفع ملف الـ PDF للمذكرة القادمة: {mtitle}</b> (<code>#{mid}</code> | {pages} ص)\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"⏳ يوجد <code>{wl_cnt}</code> مدرس في قائمة الانتظار.\n"
+                f"🛡️ <b>شرط الحماية:</b> لن تبدأ الطباعة قبل تحديد وحفظ أماكن الأختام من الموقع (🎨 تنسيق الأختام) أو من استوديو البوت.\n\n"
+                f"👇 فور حفظ الأختام سيبدأ البوت بإرسال جميع الملفات تلقائياً!",
+                reply_markup=kb,
+                permission="studio_fonts",
+            )
+            return
+
+        if event == "MATERIAL_LAYOUT_UPDATED":
+            mid = int(data.get("material_id") or 0)
+            mtitle = html.escape(str(data.get("material_title") or f"#{mid}"))
+            comp_cnt = int(data.get("completed_count") or 0)
+            if mid > 0 and comp_cnt > 0:
+                now_ts = asyncio.get_running_loop().time()
+                last_ts = self._last_layout_alert_ts.get(mid, 0.0)
+                if now_ts - last_ts < 4.0:
+                    return
+                self._last_layout_alert_ts[mid] = now_ts
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text=f"✅ موافقة — إرسال للكل ({comp_cnt} مدرس)", callback_data=f"adm_rst_all:{mid}")],
+                    [InlineKeyboardButton(text="☑️ اختيار مدرسين محددين فقط", callback_data=f"adm_rst_pick:{mid}:1")],
+                    [InlineKeyboardButton(text="⏭️ لاحقاً (الاحتفاظ بالتنسيق فقط)", callback_data=f"adm_rst_dismiss:{mid}")],
+                ])
+                await self._notify_all_admins(
+                    f"🎨 <b>تم تعديل أماكن/تنسيق أختام المذكرة: {mtitle}</b> (<code>#{mid}</code>)\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"👥 يوجد <code>{comp_cnt}</code> مدرس محفوظة بياناتهم مسبقاً لهذه المذكرة.\n"
+                    f"هل تريد إعادة طباعة وإرسال الملفات المعدلة الآن؟",
+                    reply_markup=kb,
+                    permission="batch_vip",
+                )
+            return
+
         if not chat_id:
             return
 
@@ -421,10 +483,21 @@ class RealTimeNotifier:
     # 4. مراقب التسليم الاحتياطي (Fallback Polling)
     # -------------------------------------------------------------
     async def _fallback_delivery_poller(self):
-        """فحص احتياطي دوري كل 12 ثانية للطلبات الجاهزة"""
+        """فحص احتياطي دوري كل 12 ثانية للطلبات الجاهزة وقوائم الانتظار المكتملة"""
+        tick = 0
         while self.is_running:
             await asyncio.sleep(12)
+            tick += 1
             try:
+                if tick % 2 == 1:
+                    ready_wls = await bridge_client.get_ready_waitlists()
+                    if ready_wls:
+                        from bot_service.handlers.admin_studio import trigger_waitlist_release_once
+                        for w in ready_wls:
+                            mid = int(w.get("material_id") or 0)
+                            if mid > 0:
+                                asyncio.create_task(trigger_waitlist_release_once(self.bot, mid))
+
                 stats = await bridge_client.get_admin_stats()
                 if not stats:
                     continue

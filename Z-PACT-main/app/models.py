@@ -199,6 +199,8 @@ class Material(Base):
     cover_image_path  = Column(String(500), nullable=True)       # مسار صورة غلاف المذكرة
     page_frame_path   = Column(String(500), nullable=True)       # مسار إطار المذكرة
     sender_commission = Column(Float, nullable=True)             # عمولة المرسل المخصصة لهذه المذكرة (إن وجدت)
+    is_coming_soon    = Column(Boolean, default=False, nullable=False)  # قريباً / تشويق (بيانات فقط بدون ملف PDF بعد)
+    layout_confirmed  = Column(Boolean, default=False, nullable=False)  # تم تحديد وتأكيد أماكن الأختام لهذا الملف
     created_at        = Column(DateTime, default=datetime.utcnow)
     updated_at        = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -209,6 +211,11 @@ class Material(Base):
     preview_tokens = relationship("PreviewToken", back_populates="material",           cascade="all, delete-orphan")
     reviews        = relationship("Review",       back_populates="material",           cascade="all, delete-orphan")
     bot_orders     = relationship("BotOrder",     back_populates="material")
+    teacher_entries = relationship("MaterialTeacherEntry", back_populates="material", cascade="all, delete-orphan")
+
+    @property
+    def has_pdf(self) -> bool:
+        return bool((self.original_pdf_path or "").strip()) and not bool(getattr(self, "is_coming_soon", False))
 
     def __repr__(self):
         return f"<Material id={self.id} title='{self.title}' price={self.price}>"
@@ -960,3 +967,41 @@ class AdminSecurityEvent(Base):
     ip_address  = Column(String(100), nullable=True)
     details     = Column(String(500), nullable=True)
     created_at  = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+# ================================================================
+# 22. سجل بيانات المدرسين وقائمة انتظار صدور المذكرات
+# ================================================================
+
+class MaterialTeacherEntry(Base):
+    """
+    سجل موحد يحفظ بيانات كل مدرس تم إدخاله لمذكرة معينة (عبر Excel/Word/VIP/حجز مسبق):
+      - waiting_release: في قائمة انتظار صدور ملف الـ PDF أو تأكيد أماكن الأختام
+      - completed:       تم الختم والإرسال للمشرف (ومحفوظ لإعادة الختم لاحقاً عند تعديل التنسيق)
+      - failed:          تعذر الختم ويمكن إعادة المحاولة
+    """
+    __tablename__ = "material_teacher_entries"
+
+    id                  = Column(Integer, primary_key=True, index=True)
+    material_id         = Column(Integer, ForeignKey("materials.id", ondelete="CASCADE"), nullable=False, index=True)
+    teacher_name        = Column(String(200), nullable=True)
+    phone               = Column(String(64), nullable=True)
+    phone_2             = Column(String(64), nullable=True)
+    series_name         = Column(String(200), nullable=True)
+    watermark_text      = Column(String(255), nullable=True)
+    watermark_type      = Column(String(32), default="none", nullable=False)
+    watermark_logo_path = Column(String(500), nullable=True)
+    font_family         = Column(String(64), nullable=True)
+    font_size           = Column(Float, nullable=True)
+    override_frame_path = Column(String(500), nullable=True)
+    telegram_chat_id    = Column(String(64), nullable=True)
+    telegram_user_id    = Column(String(64), nullable=True)
+    status              = Column(String(32), default="waiting_release", nullable=False, index=True)
+    last_order_code     = Column(String(64), nullable=True)
+    error_message       = Column(Text, nullable=True)
+    stamp_fingerprint   = Column(String(255), nullable=False, index=True)
+    created_at          = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at          = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    last_stamped_at     = Column(DateTime, nullable=True)
+
+    material = relationship("Material", back_populates="teacher_entries")

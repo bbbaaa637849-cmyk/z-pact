@@ -131,11 +131,13 @@ class MaterialUpdate(AppBaseModel):
     price:        Optional[Decimal] = Field(None, ge=0)
     price_coins:  Optional[Decimal] = Field(None, ge=0)
     is_published: Optional[bool]    = None
+    is_coming_soon: Optional[bool]  = None
+    layout_confirmed: Optional[bool] = None
     compression_enabled: Optional[bool] = None
     cover_image_path: Optional[str] = None
     page_frame_path: Optional[str] = None
     original_pdf_path: Optional[str] = None
-    total_pages:       Optional[int] = Field(None, ge=1)
+    total_pages:       Optional[int] = Field(None, ge=0)
 
 
 class MaterialOut(AppBaseModel):
@@ -147,6 +149,9 @@ class MaterialOut(AppBaseModel):
     price:        Decimal
     price_coins:  Decimal
     is_published: bool
+    is_coming_soon: bool = False
+    layout_confirmed: bool = False
+    has_pdf:      bool = True
     compression_enabled: bool
     total_pages:  Optional[int]
     uploaded_by:  int
