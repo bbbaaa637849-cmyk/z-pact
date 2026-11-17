@@ -115,13 +115,52 @@ class TestBatchParserAndStamper(unittest.TestCase):
         self.assertEqual(m["id"], 9)
         self.assertEqual(how, "exact_id")
 
+        # المطابقة صارمة: لا احتواء نصي ولا تشابه تقريبي
         m2, how2 = match_material_by_ref("الفيزياء الكهربائية", mats)
-        self.assertIsNotNone(m2)
-        self.assertEqual(m2["id"], 5)
-
+        self.assertIsNone(m2)
         m3, _ = match_material_by_ref("النحو الشامل", mats)
-        self.assertIsNotNone(m3)
-        self.assertEqual(m3["id"], 9)
+        self.assertIsNone(m3)
+        m4, how4 = match_material_by_ref("كتاب النحو الشامل للأستاذ", mats)
+        self.assertEqual(m4["id"], 9)
+        self.assertEqual(how4, "exact_title")
+
+    def test_03b_strict_booklet_matching_no_cross_grade_and_update_tags(self):
+        mats = [
+            {"id": 16, "title": "المراجعه النهائيه تالته اعدادي", "has_pdf": True},
+            {"id": 22, "title": "امتحانات الصف الاول الاعدادي", "has_pdf": True},
+            {"id": 21, "title": "المراجعة النهائية الصف الرابع الابتدائي", "has_pdf": True},
+            {"id": 33, "title": "مراجعة نوفمبر الصف الاول الثانوي", "has_pdf": True},
+            {"id": 36, "title": "المراجعة النهائية الصف الاول الاعدادي", "has_pdf": True},
+            {"id": 17, "title": "امتحانات الصف الثالث الاعدادي", "has_pdf": True},
+        ]
+        m, how = match_material_by_ref("المراجعه النهائيه تالته اعدادي", mats)
+        self.assertEqual((m or {}).get("id"), 16)
+        for ref in (
+            "امتحانات الصف الرابع الابتدائي ( اخر تعديل )",
+            "المراجعة النهائية الصف الاول الثانوي ( اخر تعديل )",
+            "المراجعة النهائية الصف الاول الاعدادي ( اخر تعديل )",
+            "المراجعة النهائية الصف الاول الثانوي",
+            "امتحانات الصف الرابع الابتدائي",
+        ):
+            mm, how = match_material_by_ref(ref, mats)
+            self.assertIsNone(mm, f"{ref} -> {mm}")
+        # نفس المذكرة بصياغة مختلفة (نفس الصف/المرحلة/النوع) تطابق بالبصمة الكاملة
+        ms, how_s = match_material_by_ref("المراجعه النهائيه الصف الثالث الاعدادي", mats)
+        self.assertEqual((ms or {}).get("id"), 16)
+        self.assertEqual(how_s, "signature_title")
+        # الاسم الصحيح كما هو يطابق #36
+        m36, _ = match_material_by_ref("المراجعة النهائية الصف الاول الاعدادي", mats)
+        self.assertEqual(m36["id"], 36)
+
+    def test_03c_logo_requested_once_per_repeated_teacher(self):
+        from bot_service.handlers import admin_studio as ast_mod
+        e1 = {"idx": 1, "teacher_name": "أحمد", "phone": "01011112222", "watermark_type": "logo"}
+        e2 = {"idx": 2, "teacher_name": "احمد", "phone": "01011112222", "watermark_type": "logo"}
+        e3 = {"idx": 3, "teacher_name": "سمر", "phone": "01033334444", "watermark_type": "logo"}
+        self.assertEqual(ast_mod._teacher_identity_key(e1), ast_mod._teacher_identity_key(e2))
+        self.assertNotEqual(ast_mod._teacher_identity_key(e1), ast_mod._teacher_identity_key(e3))
+        text, _ = ast_mod._render_batch_summary_text_and_kb({"batch_entries": [e1, e2, e3], "batch_source": "t"})
+        self.assertIn("يوجد <code>2</code> مدرس", text)
 
     def test_04_transparent_frame_stripping_and_multi_font_preview(self):
         fonts = stamper_mod.list_available_fonts()

@@ -391,7 +391,7 @@ async def process_vip_mat_id(message: Message, state: FSMContext):
     else:
         from bot_service.services.batch_parser import match_material_by_ref
         materials = await bridge_client.get_materials(include_unpublished=True)
-        mat, _ = match_material_by_ref(raw, materials)
+        mat, _ = match_material_by_ref(raw, materials, allow_unique_partial=True)
         if not mat:
             await message.answer("⚠️ لم يتم العثور على مذكرة مطابقة؛ أدخل رقم المعرف أو جزءاً من اسم المذكرة أو اضغط على زرها بالأعلى.")
             return

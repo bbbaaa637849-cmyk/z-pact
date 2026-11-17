@@ -6,7 +6,6 @@
 import csv
 import io
 import re
-from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Tuple
 
 import stamp_settings
@@ -672,10 +671,93 @@ def parse_coins_recharges_from_text(raw_text: str) -> List[Dict[str, Any]]:
     ]
 
 
-def match_material_by_ref(ref: Any, materials: List[Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], str]:
+_UPDATE_TAG_PATTERNS = (
+    "اخر تعديل", "اخر تحديث", "قريبا", "جديد", "جديده", "تحديث", "محدث", "تعديل جديد", "قيد الانتظار",
+)
+
+_GRADE_WORDS = {
+    "اول": 1, "الاول": 1, "اولي": 1, "الاولي": 1,
+    "ثاني": 2, "الثاني": 2, "تاني": 2, "التاني": 2, "ثانيه": 2, "تانيه": 2, "الثانيه": 2, "التانيه": 2,
+    "ثالث": 3, "الثالث": 3, "تالت": 3, "التالت": 3, "ثالثه": 3, "تالته": 3, "الثالثه": 3, "التالته": 3,
+    "رابع": 4, "الرابع": 4, "رابعه": 4, "الرابعه": 4,
+    "خامس": 5, "الخامس": 5, "خامسه": 5, "الخامسه": 5,
+    "سادس": 6, "السادس": 6, "سادسه": 6, "السادسه": 6,
+}
+_STAGE_WORDS = {
+    "ابتدايي": "primary", "الابتدايي": "primary", "ابتدائي": "primary", "الابتدائي": "primary", "ابتداءي": "primary",
+    "اعدادي": "prep", "الاعدادي": "prep", "اعداديه": "prep",
+    "ثانوي": "secondary", "الثانوي": "secondary", "ثانويه": "secondary", "الثانويه": "secondary",
+    "بكالوريا": "bacc", "البكالوريا": "bacc",
+}
+# أنواع المذكرات: عبارات (بعد التطبيع) -> نوع
+_TYPE_PHRASES = (
+    ("مراجعه نهائيه", "final_review"),
+    ("المراجعه النهائيه", "final_review"),
+    ("مراجعه نوفمبر", "nov_review"),
+    ("كراسه تقييم", "eval_booklet"),
+    ("اوائل الطلبه", "top_students"),
+    ("اوايل الطلبه", "top_students"),
+    ("امتحانات", "exams"),
+    ("امتحان", "exams"),
+    ("تقييمات", "evals"),
+    ("تقييم", "evals"),
+    ("توجيه", "guidance"),
+    ("شرح", "explain"),
+    ("بدون نظري", "no_theory"),
+    ("بدون اجابات", "no_answers"),
+    ("بالاجابات", "with_answers"),
+)
+_STOP_TOKENS = {"الصف", "صف", "ال", "في", "من", "و", "مذكره", "مذكرة", "للصف"}
+
+
+def has_update_or_waiting_tag(text: Any) -> bool:
+    """هل الاسم يحتوي على وسم تحديث/انتظار مثل ( اخر تعديل ) أو (قريباً) أو (جديد)؟"""
+    norm = f" {normalize_arabic_text(str(text or ''))} "
+    return any(f" {pat} " in norm for pat in _UPDATE_TAG_PATTERNS)
+
+
+def material_title_signature(text: Any) -> Dict[str, Any]:
+    """يستخرج (الصف، المرحلة، نوع المذكرة، باقي الكلمات المميزة) من اسم المذكرة."""
+    norm = normalize_arabic_text(str(text or ""))
+    types: set = set()
+    work = f" {norm} "
+    for phrase, kind in sorted(_TYPE_PHRASES, key=lambda x: -len(x[0])):
+        if phrase and f" {phrase} " in work:
+            types.add(kind)
+            work = work.replace(f" {phrase} ", " ")
+    grades: set = set()
+    stages: set = set()
+    residual: List[str] = []
+    for tok in work.split():
+        if tok in _STAGE_WORDS:
+            stages.add(_STAGE_WORDS[tok])
+        elif tok in _GRADE_WORDS:
+            grades.add(_GRADE_WORDS[tok])
+        elif tok in _STOP_TOKENS:
+            continue
+        else:
+            residual.append(tok)
+    return {
+        "grades": frozenset(grades),
+        "stages": frozenset(stages),
+        "types": frozenset(types),
+        "residual": tuple(sorted(residual)),
+    }
+
+
+def match_material_by_ref(
+    ref: Any,
+    materials: List[Dict[str, Any]],
+    allow_unique_partial: bool = False,
+) -> Tuple[Optional[Dict[str, Any]], str]:
     """
-    مطابقة ذكية للمذكرة بالرقم التعريفي (ID) أو بالاسم الكامل أو الجزئي.
-    تُرجع (material_dict | None, طريقة المطابقة).
+    مطابقة صارمة للمذكرة (بدون أي تشابه تقريبي Fuzzy):
+      1) رقم ID مباشر.
+      2) تطابق تام للاسم بعد تطبيع بسيط (أ/إ/آ→ا، ة→ه، ى→ي، تنظيف المسافات).
+      3) تطابق بنفس البصمة (الصف + المرحلة + النوع + باقي الكلمات) — فقط إذا خلا الاسم من وسوم
+         التحديث/الانتظار مثل ( اخر تعديل ) وكانت البصمة كاملة ومحددة بمذكرة واحدة فقط.
+    أي اسم لا يطابق يُرجع (None, "not_found") ليذهب لمسار قائمة الانتظار / التشويق.
+    `allow_unique_partial` للبحث اليدوي بالأدمن فقط (احتواء نصي بشرط وجود نتيجة وحيدة).
     """
     if ref is None or not str(ref).strip() or not materials:
         return None, "missing"
@@ -690,37 +772,47 @@ def match_material_by_ref(ref: Any, materials: List[Dict[str, Any]]) -> Tuple[Op
         for m in materials:
             if int(m.get("id", -1)) == mid:
                 return m, "exact_id"
+        return None, "not_found"
 
     norm_ref = normalize_arabic_text(raw)
     if not norm_ref:
         return None, "missing"
 
-    # 2. مطابقة تطابق تام بعد التطبيع
-    for m in materials:
-        if normalize_arabic_text(m.get("title", "")) == norm_ref:
-            return m, "exact_title"
+    # 2. تطابق تام بعد التطبيع (يفضّل المذكرة الجاهزة إن تكررت)
+    exact = [m for m in materials if normalize_arabic_text(m.get("title", "")) == norm_ref]
+    if exact:
+        exact.sort(key=lambda m: (not bool(m.get("has_pdf", m.get("file_exists", True))), int(m.get("id", 0))))
+        return exact[0], "exact_title"
 
-    # 3. مطابقة احتواء نصي
-    contains_matches = []
-    for m in materials:
-        norm_title = normalize_arabic_text(m.get("title", ""))
-        if norm_ref in norm_title or norm_title in norm_ref:
-            contains_matches.append((len(norm_title), m))
-    if contains_matches:
-        contains_matches.sort(key=lambda x: x[0])
-        return contains_matches[0][1], "partial_title"
+    # الأسماء الموسومة بـ ( اخر تعديل ) / (قريباً) / (جديد) لا تُربط بأي مذكرة قديمة
+    if has_update_or_waiting_tag(raw):
+        return None, "update_tag"
 
-    # 4. مطابقة بالتشابه اللغوي Fuzzy
-    best_score = 0.0
-    best_mat = None
-    for m in materials:
-        norm_title = normalize_arabic_text(m.get("title", ""))
-        score = SequenceMatcher(None, norm_ref, norm_title).ratio()
-        if score > best_score:
-            best_score = score
-            best_mat = m
-    if best_mat and best_score >= 0.55:
-        return best_mat, f"fuzzy({best_score:.2f})"
+    # 3. تطابق البصمة الكاملة (صف + مرحلة + نوع + كلمات مميزة)
+    sig = material_title_signature(raw)
+    if len(sig["grades"]) == 1 and len(sig["stages"]) == 1 and sig["types"]:
+        sig_matches = [
+            m for m in materials
+            if not has_update_or_waiting_tag(m.get("title", ""))
+            and material_title_signature(m.get("title", "")) == sig
+        ]
+        if len(sig_matches) == 1:
+            return sig_matches[0], "signature_title"
+        if len(sig_matches) > 1:
+            sig_matches.sort(key=lambda m: (not bool(m.get("has_pdf", m.get("file_exists", True))), int(m.get("id", 0))))
+            return sig_matches[0], "signature_title"
+
+    # 4. للبحث اليدوي فقط: احتواء نصي بنتيجة وحيدة وبنفس الصف/المرحلة
+    if allow_unique_partial:
+        cands = []
+        for m in materials:
+            nt = normalize_arabic_text(m.get("title", ""))
+            if nt and (norm_ref in nt or nt in norm_ref):
+                msig = material_title_signature(m.get("title", ""))
+                if msig["grades"] == sig["grades"] and msig["stages"] == sig["stages"] and msig["types"] == sig["types"]:
+                    cands.append(m)
+        if len(cands) == 1:
+            return cands[0], "partial_title"
 
     return None, "not_found"
 

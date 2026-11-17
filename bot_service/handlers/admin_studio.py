@@ -34,6 +34,7 @@ from bot_service.services.batch_parser import (
     filter_usable_materials,
     match_material_by_ref,
     normalize_arabic_text,
+    normalize_phone_value,
     parse_coins_recharges_from_file,
     parse_coins_recharges_from_text,
     parse_text_teacher_entries,
@@ -276,7 +277,7 @@ async def _prepare_and_show_batch_review(
         mat, method = match_material_by_ref(entry.get("material_ref"), admin_mats)
         if not mat and not entry.get("material_ref") and entry.get("series_name"):
             cand_mat, cand_method = match_material_by_ref(entry.get("series_name"), admin_mats)
-            if cand_mat and cand_method in ("exact_id", "exact_title", "partial_title"):
+            if cand_mat and cand_method in ("exact_id", "exact_title", "signature_title"):
                 mat, method = cand_mat, cand_method
 
         spec_key: Optional[str] = None
@@ -398,10 +399,18 @@ def _render_batch_summary_text_and_kb(state_data: Dict[str, Any]) -> tuple[str, 
     runnable_ready = 0
     waitlist_count = 0
     missing_mat = 0
-    pending_logos = [
+    pending_logos_all = [
         e for e in entries
         if str(e.get("watermark_type") or "").lower() == "logo" and not e.get("watermark_logo_path")
     ]
+    _seen_logo_keys: set = set()
+    pending_logos = []
+    for _e in pending_logos_all:
+        _k = _teacher_identity_key(_e) or f"row:{_e.get('idx')}"
+        if _k in _seen_logo_keys:
+            continue
+        _seen_logo_keys.add(_k)
+        pending_logos.append(_e)
     ready_logos = [e for e in entries if e.get("watermark_logo_path")]
 
     lines = [
@@ -424,14 +433,14 @@ def _render_batch_summary_text_and_kb(state_data: Dict[str, Any]) -> tuple[str, 
         st = e.get("status_tag")
         if st == "ready" or (e.get("matched_material_id") and st is None):
             runnable_ready += 1
-            lines.append(f"🟢 #{e['idx']} {name} (<code>{phone}</code>){series_lbl}{wm_lbl} ⬅️ <i>{html.escape(str(e.get('matched_material_title') or ''))}</i>")
+            lines.append(f"🟢 #{e['idx']} {name} (<code>{phone}</code>){series_lbl}{wm_lbl} ⬅️ <i>{html.escape(str(e.get('matched_material_title') or ''))}</i> — جاهز للتنفيذ الفوري")
         elif st == "waitlist_existing":
             waitlist_count += 1
             why = "بانتظار PDF" if not e.get("mat_has_pdf", True) else "بانتظار الأختام"
-            lines.append(f"⏳ #{e['idx']} {name} (<code>{phone}</code>){series_lbl}{wm_lbl} ⬅️ <i>{html.escape(str(e.get('matched_material_title') or ''))} ({why})</i>")
+            lines.append(f"⏳ #{e['idx']} {name} (<code>{phone}</code>){series_lbl}{wm_lbl} ⬅️ <i>{html.escape(str(e.get('matched_material_title') or ''))} ({why})</i> — قائمة الانتظار")
         elif st == "waitlist_new_upcoming":
             waitlist_count += 1
-            lines.append(f"✨ #{e['idx']} {name} (<code>{phone}</code>){series_lbl}{wm_lbl} ⬅️ <i>{html.escape(str(e.get('matched_material_title') or ''))} (تشويق قريباً)</i>")
+            lines.append(f"✨ #{e['idx']} {name} (<code>{phone}</code>){series_lbl}{wm_lbl} ⬅️ <i>{html.escape(str(e.get('matched_material_title') or ''))} (تشويق قريباً)</i> — قائمة الانتظار / تشويق")
         elif def_id:
             if def_ready:
                 runnable_ready += 1
@@ -750,6 +759,15 @@ def _batch_entry_label(entry: Dict[str, Any]) -> str:
     )
 
 
+def _teacher_identity_key(e: Dict[str, Any]) -> str:
+    """مفتاح هوية المدرس داخل الدفعة: الهاتف المطبّع أولاً ثم الاسم المطبّع."""
+    ph = normalize_phone_value(e.get("phone") or "")
+    if ph:
+        return f"p:{ph}"
+    nm = normalize_arabic_text(str(e.get("teacher_name") or ""))
+    return f"n:{nm}" if nm else ""
+
+
 def _find_next_pending_logo_entry(entries: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     for e in entries:
         if (
@@ -913,8 +931,17 @@ async def handle_batch_logo_received(message: Message, state: FSMContext):
     active_idx = data.get("batch_logo_active_idx")
 
     updated_labels = []
+    # نفس المدرس (نفس الهاتف أو الاسم) المتكرر في أكثر من صف يأخذ نفس اللوجو تلقائياً دون طلبه مرة أخرى
+    target_keys = set()
+    if target_mode != "all" and active_idx is not None:
+        for e in entries:
+            if int(e.get("idx", 0)) == int(active_idx):
+                k = _teacher_identity_key(e)
+                if k:
+                    target_keys.add(k)
     for e in entries:
-        if target_mode == "all" or (active_idx is not None and int(e.get("idx", 0)) == int(active_idx)):
+        same_teacher = bool(target_keys) and _teacher_identity_key(e) in target_keys
+        if target_mode == "all" or same_teacher or (active_idx is not None and int(e.get("idx", 0)) == int(active_idx)):
             e["watermark_type"] = "logo"
             e["watermark_logo_path"] = logo_path
             e.pop("watermark_text", None)
