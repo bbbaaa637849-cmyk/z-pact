@@ -429,6 +429,8 @@ def _render_batch_summary_text_and_kb(state_data: Dict[str, Any]) -> tuple[str, 
             wm_lbl = f" | 💧 {html.escape(str(e.get('watermark_text')))}"
         else:
             wm_lbl = ""
+        if e.get("watermark_opacity") is not None and wm_lbl:
+            wm_lbl += f" ({int(round(float(e['watermark_opacity']) * 100))}%)"
 
         st = e.get("status_tag")
         if st == "ready" or (e.get("matched_material_id") and st is None):
@@ -1047,6 +1049,7 @@ async def execute_stamp_items_sequential(
                 "watermark_logo_path": item_wm_logo,
                 "font_family": item.get("font_family") or batch_font,
                 "font_size": item.get("font_size"),
+                "watermark_opacity": item.get("watermark_opacity"),
                 "override_frame_path": item.get("override_frame_path") or batch_frame,
                 "telegram_chat_id": str(chat_id),
                 "telegram_user_id": str(user_id),

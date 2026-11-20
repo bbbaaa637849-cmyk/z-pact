@@ -1974,8 +1974,16 @@ async def direct_stamp_sync_endpoint(
     explicit_font_size = payload.get("font_size")
 
     processed_elements = []
+    wm_opacity_override = None
+    try:
+        if payload.get("watermark_opacity") not in (None, ""):
+            wm_opacity_override = max(0.02, min(1.0, float(payload.get("watermark_opacity"))))
+    except (TypeError, ValueError):
+        wm_opacity_override = None
     for el in raw_elements:
         item = dict(el)
+        if wm_opacity_override is not None and item.get("type") in ("watermark", "logo_watermark"):
+            item["opacity"] = wm_opacity_override
         if mat.tag and item.get("custom_text"):
             item["custom_text"] = item["custom_text"].replace("{tag}", mat.tag).replace("[tag]", mat.tag)
         if override_font:

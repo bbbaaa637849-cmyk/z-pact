@@ -85,6 +85,10 @@ _HEADER_ALIASES: Dict[str, Tuple[str, ...]] = {
     "font_size": (
         "حجم الخط", "حجم", "font size", "font_size", "size",
     ),
+    "watermark_opacity": (
+        "نسبه العلامه المائيه", "نسبه ظهور العلامه المائيه", "نسبه ظهور العلامه", "نسبه العلامه",
+        "شفافيه العلامه المائيه", "نسبه الشفافيه", "watermark opacity", "watermark_opacity", "opacity",
+    ),
     "material_description": (
         "وصف المذكره", "الوصف", "وصف", "التفاصيل", "تفاصيل المذكره",
         "description", "desc", "booklet description", "material description",
@@ -151,6 +155,25 @@ def is_logo_watermark_token(val: Any) -> bool:
     if tokens and tokens.issubset(allowed):
         return any(t in tokens for t in ("لوجو", "لوقو", "شعار", "صوره", "logo", "image", "img", "pic", "picture", "photo"))
     return False
+
+
+def parse_watermark_opacity(val: Any) -> Optional[float]:
+    """تحويل نسبة ظهور العلامة المائية (15 / 15% / ١٥٪ / 0.15) إلى كسر بين 0.02 و 1.0؛ الفارغ أو غير المفهوم = None (الديفولت)."""
+    s = str(val if val is not None else "").translate(ARABIC_DIGITS_MAP).strip()
+    if not s or _is_skip_token(s):
+        return None
+    has_pct = "%" in s or "٪" in s
+    num_str = re.sub(r"[^\d.]", "", s)
+    if not num_str or num_str.count(".") > 1:
+        return None
+    try:
+        num = float(num_str)
+    except ValueError:
+        return None
+    if num <= 0:
+        return None
+    frac = num / 100.0 if (has_pct or num > 1) else num
+    return round(max(0.02, min(1.0, frac)), 3)
 
 
 def _normalize_watermark_entry_fields(entry: Dict[str, Any]) -> None:
@@ -241,6 +264,10 @@ def _row_to_entry(
             norm_p = normalize_phone_value(val)
             if norm_p:
                 entry[field] = norm_p
+        elif field == "watermark_opacity":
+            op_val = parse_watermark_opacity(val)
+            if op_val is not None:
+                entry[field] = op_val
         elif field in ("font_size", "material_price", "material_price_coins", "add_coins"):
             try:
                 num_str = re.sub(r"[^\d.\-]", "", str(val).translate(ARABIC_DIGITS_MAP).strip())
@@ -505,6 +532,8 @@ def parse_text_teacher_entries(raw_text: str, is_admin: bool = False) -> List[Di
                 val = v_raw.strip()
                 if mapped in ("phone", "phone_2"):
                     val = normalize_phone_value(val)
+                elif mapped == "watermark_opacity":
+                    val = parse_watermark_opacity(val)
                 elif mapped in ("font_size", "material_price", "material_price_coins", "add_coins"):
                     try:
                         num_str = re.sub(r"[^\d.\-]", "", val.translate(ARABIC_DIGITS_MAP).strip())
@@ -839,6 +868,7 @@ def build_excel_template_bytes(materials: Optional[List[Dict[str, Any]]] = None)
         "هاتف 2",             # اختياري
         "الخط",               # اختياري
         "حجم الخط",           # اختياري
+        "نسبة العلامة المائية",  # اختياري — نسبة ظهور العلامة المائية (مثل 15 أو 15%) وتُترك فارغة للديفولت
     ]
 
     header_fill = PatternFill(start_color="0F172A", end_color="0F172A", fill_type="solid")
@@ -853,8 +883,8 @@ def build_excel_template_bytes(materials: Optional[List[Dict[str, Any]]] = None)
 
     first_mat_title = materials[0]["title"] if materials else "اسم المذكرة أو رقمها"
     sample_rows = [
-        ["د. أحمد محمد علي", "01012345678", first_mat_title, "", "", "", "سلسلة التفوق", "نسخة خاصة بالمدرس", "", "cairo", ""],
-        ["أ. سارة محمود", "01198765432", first_mat_title, "", "", "", "", "", "01200001111", "", ""],
+        ["د. أحمد محمد علي", "01012345678", first_mat_title, "", "", "", "سلسلة التفوق", "نسخة خاصة بالمدرس", "", "cairo", "", "20%"],
+        ["أ. سارة محمود", "01198765432", first_mat_title, "", "", "", "", "", "01200001111", "", "", ""],
     ]
 
     for r_offset, row_vals in enumerate(sample_rows, start=2):
@@ -865,7 +895,7 @@ def build_excel_template_bytes(materials: Optional[List[Dict[str, Any]]] = None)
                 c.number_format = "@"
             c.alignment = Alignment(horizontal="center", vertical="center")
 
-    widths = [24, 18, 28, 32, 14, 15, 22, 24, 18, 12, 12]
+    widths = [24, 18, 28, 32, 14, 15, 22, 24, 18, 12, 12, 16]
     for idx, w in enumerate(widths, start=1):
         col_letter = openpyxl.utils.get_column_letter(idx)
         ws.column_dimensions[col_letter].width = w
@@ -894,6 +924,7 @@ def build_excel_template_bytes(materials: Optional[List[Dict[str, Any]]] = None)
         ("العلامة المائية", "اكتب نص العلامة المائية، أو اكتب كلمة (لوجو) أو (صورة) لإرفاق صورة لوجو خاص بالمدرس من البوت، أو اتركه فارغاً"),
         ("هاتف 2", "رقم إضافي يظهر بالتبادل في الصفحات الداخلية"),
         ("الخط وحجم الخط", "الخط مثل: cairo / tahoma / arial / naskh — وحجم الخط رقم مثل 14 أو 16"),
+        ("نسبة العلامة المائية", "اختياري: نسبة ظهور العلامة المائية (نص أو لوجو) مثل 15 أو 15% أو 0.15 — اتركها فارغة لاستخدام الديفولت"),
     ]
     for r_idx, (k, v) in enumerate(info_lines, start=1):
         ws_info.cell(row=r_idx, column=1, value=k)

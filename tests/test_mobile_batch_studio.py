@@ -152,6 +152,23 @@ class TestBatchParserAndStamper(unittest.TestCase):
         m36, _ = match_material_by_ref("المراجعة النهائية الصف الاول الاعدادي", mats)
         self.assertEqual(m36["id"], 36)
 
+    def test_03d_watermark_opacity_column_optional(self):
+        from bot_service.services.batch_parser import parse_watermark_opacity, _extract_from_matrix
+        self.assertEqual(parse_watermark_opacity("20%"), 0.2)
+        self.assertEqual(parse_watermark_opacity("١٥"), 0.15)
+        self.assertEqual(parse_watermark_opacity("0.3"), 0.3)
+        self.assertIsNone(parse_watermark_opacity(""))
+        self.assertIsNone(parse_watermark_opacity(None))
+        self.assertEqual(parse_watermark_opacity("500"), 1.0)
+        rows = [
+            ["اسم المدرس", "رقم الهاتف", "العلامة المائية", "نسبة العلامة المائية"],
+            ["أ/ أحمد", "01012345678", "نسخة خاصة", "25%"],
+            ["أ/ سمر", "01098765432", "نسخة سمر", ""],
+        ]
+        parsed = _extract_from_matrix(rows, is_admin=True)
+        self.assertEqual(parsed[0].get("watermark_opacity"), 0.25)
+        self.assertNotIn("watermark_opacity", parsed[1])
+
     def test_03c_logo_requested_once_per_repeated_teacher(self):
         from bot_service.handlers import admin_studio as ast_mod
         e1 = {"idx": 1, "teacher_name": "أحمد", "phone": "01011112222", "watermark_type": "logo"}
