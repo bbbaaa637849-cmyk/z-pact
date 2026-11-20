@@ -1,7 +1,8 @@
 # ================================================================
-# Z-PACT Enterprise Ecosystem — Unified Root Dockerfile (Hugging Face Spaces & Railway)
+# Z-PACT Enterprise Ecosystem — Unified Root Dockerfile (Railway & Hugging Face Spaces)
 # يشغّل المنصة الأساسية FastAPI + محرك SMS Webhook + بوت التيليجرام + الميني آب معاً
-# جاهز للعمل المباشر على Hugging Face Spaces (المنفذ 7860 ومستخدم غير جذري UID 1000) و Railway
+# يحافظ على صلاحيات root على Railway لقراءة/كتابة Volume الدائم (/data) دون أي فقدان
+# كما يمنح صلاحيات الكتابة للمجلدات لتوافق Hugging Face Spaces
 # ================================================================
 
 FROM python:3.11-slim-bookworm
@@ -11,12 +12,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONIOENCODING=utf-8 \
     PYTHONUTF8=1 \
     ZPACT_LOW_CPU_MODE=1 \
-    PORT=7860 \
-    HOME=/home/user \
-    PATH=/home/user/.local/bin:$PATH
-
-# إنشاء مستخدم غير جذري (UID 1000) متوافق مع متطلبات أمان Hugging Face Spaces
-RUN useradd -m -u 1000 user
+    PORT=8000
 
 WORKDIR /app
 
@@ -39,10 +35,10 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r /app/requirements.txt
 
-# نسخ كامل ملفات المشروع وقاعدة البيانات والملازم والأصول مع ملكية المستخدم 1000
-COPY --chown=user:user . /app
+# نسخ كامل ملفات المشروع وقاعدة البيانات والملازم والأصول
+COPY . /app
 
-# تجهيز مجلدات التخزين المطلوبة للتشغيل السحابي المباشر وضبط صلاحيات الكتابة للمستخدم 1000
+# تجهيز مجلدات التخزين المطلوبة للتشغيل السحابي المباشر بصلاحيات كاملة
 RUN mkdir -p \
     /app/Z-PACT-main/storage/originals \
     /app/Z-PACT-main/storage/stamped \
@@ -54,11 +50,8 @@ RUN mkdir -p \
     /app/Z-PACT-main/storage/receipts \
     /app/Z-PACT-main/storage/watermarks \
     /app/Z-PACT-main/storage/bot_tmp \
-    && chown -R user:user /app \
-    && chmod -R u+rwX,g+rwX /app/Z-PACT-main/storage
+    && chmod -R 777 /app/Z-PACT-main/storage /app/Z-PACT-main
 
-USER user
+EXPOSE 8000 7860
 
-EXPOSE 7860
-
-CMD ["python", "-u", "orchestrator.py", "--cloud"]
+CMD ["python", "-u", "orchestrator.py", "--railway"]

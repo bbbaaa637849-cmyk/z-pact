@@ -395,6 +395,31 @@ def print_banner(public_url: Optional[str] = None, core_port: int = 8000, webhoo
 async def main():
     log_orch("🚀 بدء تشغيل المشرف الموحد لمنظومة Z-PACT...", COLOR_YELLOW)
 
+    # 0. استعادة البيانات السحابية تلقائياً من Private Hugging Face Dataset (إن كان مفعلاً) قبل بدء الخدمات
+    hf_sync_mod = None
+    hf_sync_cfg = {"enabled": False, "interval_sec": 300}
+    try:
+        import hf_cloud_sync as _hf_sync_mod
+        hf_sync_mod = _hf_sync_mod
+        hf_sync_cfg = hf_sync_mod.get_hf_sync_config()
+        if hf_sync_cfg["enabled"]:
+            if hf_sync_cfg["mode"] == "push_only":
+                log_orch(
+                    f"☁️ [HF Sync] وضع الرفع فقط (push_only) مفعّل — جاري رفع كامل بيانات السيرفر الحالي إلى {hf_sync_cfg['repo_id']}...",
+                    COLOR_CYAN,
+                )
+                push_res = await asyncio.to_thread(hf_sync_mod.backup_to_hf_dataset, True)
+                log_orch(f"☁️ [HF Sync] نتيجة الرفع الأولي: {push_res}", COLOR_GREEN if push_res.get("ok") else COLOR_RED)
+            else:
+                log_orch(
+                    f"☁️ [HF Sync] جاري استعادة أحدث نسخة من قاعدة البيانات والملفات من {hf_sync_cfg['repo_id']}...",
+                    COLOR_CYAN,
+                )
+                pull_res = await asyncio.to_thread(hf_sync_mod.restore_from_hf_dataset)
+                log_orch(f"☁️ [HF Sync] نتيجة الاستعادة: {pull_res}", COLOR_GREEN if pull_res.get("ok") else COLOR_RED)
+    except Exception as hf_err:
+        log_orch(f"⚠️ [HF Sync] تعذر تهيئة المزامنة السحابية: {hf_err}", COLOR_YELLOW)
+
     # تشغيل الفحص المسبق
     run_preflight_checks()
 
@@ -569,6 +594,7 @@ async def main():
         except NotImplementedError:
             pass
 
+    last_hf_sync_ts = time.monotonic()
     try:
         while not stop_event.is_set():
             for s in services:
@@ -576,6 +602,20 @@ async def main():
                     log_orch(f"⚠️ تنبيه: الخدمة [{s.name}] توقفت برمز الخروج ({s.process.returncode}) — جاري إعادة تشغيلها...", COLOR_RED)
                     await asyncio.sleep(2.0)
                     await s.start()
+
+            # مزامنة تلقائية مجانية مع Private Hugging Face Dataset كل بضع دقائق (فقط عند وجود تغييرات)
+            if hf_sync_mod and hf_sync_cfg.get("enabled") and hf_sync_cfg.get("mode") != "pull_only":
+                if (time.monotonic() - last_hf_sync_ts) >= hf_sync_cfg.get("interval_sec", 300):
+                    last_hf_sync_ts = time.monotonic()
+                    try:
+                        sync_res = await asyncio.to_thread(hf_sync_mod.backup_to_hf_dataset, False)
+                        if sync_res.get("uploaded_files", 0) > 0:
+                            log_orch(
+                                f"☁️ [HF Sync] تم حفظ {sync_res['uploaded_files']} ملف محدث إلى {hf_sync_cfg['repo_id']}.",
+                                COLOR_GREEN,
+                            )
+                    except Exception as sync_err:
+                        log_orch(f"⚠️ [HF Sync] تعذر النسخ الاحتياطي الدوري: {sync_err}", COLOR_YELLOW)
 
             # مراقب الاستشفاء التلقائي للنفق السحابي (Auto-Heal Watchdog ضد Error 1033)
             if tunnel_mgr and tunnel_mgr.process and tunnel_mgr.process.returncode is not None and not stop_event.is_set():
@@ -603,6 +643,13 @@ async def main():
             await s.stop()
         if tunnel_mgr:
             await tunnel_mgr.stop()
+        if hf_sync_mod and hf_sync_cfg.get("enabled") and hf_sync_cfg.get("mode") != "pull_only":
+            try:
+                log_orch("☁️ [HF Sync] حفظ النسخة النهائية للبيانات قبل الإغلاق...", COLOR_CYAN)
+                final_res = await asyncio.to_thread(hf_sync_mod.backup_to_hf_dataset, False)
+                log_orch(f"☁️ [HF Sync] نتيجة الحفظ النهائي: {final_res}", COLOR_GREEN if final_res.get("ok") else COLOR_YELLOW)
+            except Exception as final_err:
+                log_orch(f"⚠️ [HF Sync] تعذر الحفظ النهائي: {final_err}", COLOR_YELLOW)
         log_orch("✓ تم إيقاف جميع الأنظمة بنجاح ونظافة.", COLOR_GREEN)
 
 
