@@ -1996,6 +1996,18 @@ async def direct_stamp_sync_endpoint(
             item["font_size"] = max(4.0, min(180.0, float(item.get("font_size", 14.0)) + font_size_delta))
         processed_elements.append(item)
 
+    # إذا اختار المدرس لوجو وحدد نسبة ظهور خاصة ولم يكن للمذكرة عنصر logo_watermark محفوظ مسبقاً، نضيفه بالنسبة المحددة
+    if wm_type in ("logo", "teacher", "platform", "image") and wm_opacity_override is not None:
+        if not any(el.get("type") == "logo_watermark" for el in processed_elements):
+            processed_elements.append({
+                "type": "logo_watermark",
+                "x_pct": 50.0,
+                "y_pct": 50.0,
+                "scale": 220,
+                "opacity": wm_opacity_override,
+                "page": 0,
+            })
+
     tg_chat = str(payload.get("telegram_chat_id") or "8287744705")
     tg_user = str(payload.get("telegram_user_id") or tg_chat)
     order_code = f"BAT-{secrets.token_hex(3).upper()}"

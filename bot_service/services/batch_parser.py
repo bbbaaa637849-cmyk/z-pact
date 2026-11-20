@@ -157,11 +157,40 @@ def is_logo_watermark_token(val: Any) -> bool:
     return False
 
 
+_WATERMARK_OPACITY_KEYWORDS: Dict[str, float] = {
+    "خفيف جدا": 0.08,
+    "خفيفه جدا": 0.08,
+    "خفيف": 0.12,
+    "خفيفه": 0.12,
+    "هادئ": 0.12,
+    "متوسط": 0.30,
+    "متوسطه": 0.30,
+    "طبيعي": 0.30,
+    "عادي": 0.30,
+    "عالي": 0.55,
+    "عاليه": 0.55,
+    "اعلي": 0.55,
+    "اعلي من الطبيعي": 0.55,
+    "واضح": 0.55,
+    "واضحه": 0.55,
+    "قوي": 0.75,
+    "قويه": 0.75,
+    "غامق": 0.75,
+    "غامقه": 0.75,
+    "قوي جدا": 0.90,
+    "غامق جدا": 0.90,
+    "كامل": 1.0,
+}
+
+
 def parse_watermark_opacity(val: Any) -> Optional[float]:
-    """تحويل نسبة ظهور العلامة المائية (15 / 15% / ١٥٪ / 0.15) إلى كسر بين 0.02 و 1.0؛ الفارغ أو غير المفهوم = None (الديفولت)."""
+    """تحويل نسبة ظهور العلامة المائية (45 / 45% / ٤٥٪ / 0.45 / أو كلمات مثل: عالي، قوي، خفيف) إلى كسر بين 0.02 و 1.0؛ الفارغ = None (الديفولت)."""
     s = str(val if val is not None else "").translate(ARABIC_DIGITS_MAP).strip()
     if not s or _is_skip_token(s):
         return None
+    norm_kw = normalize_arabic_text(s)
+    if norm_kw in _WATERMARK_OPACITY_KEYWORDS:
+        return _WATERMARK_OPACITY_KEYWORDS[norm_kw]
     has_pct = "%" in s or "٪" in s
     num_str = re.sub(r"[^\d.]", "", s)
     if not num_str or num_str.count(".") > 1:
@@ -883,7 +912,7 @@ def build_excel_template_bytes(materials: Optional[List[Dict[str, Any]]] = None)
 
     first_mat_title = materials[0]["title"] if materials else "اسم المذكرة أو رقمها"
     sample_rows = [
-        ["د. أحمد محمد علي", "01012345678", first_mat_title, "", "", "", "سلسلة التفوق", "نسخة خاصة بالمدرس", "", "cairo", "", "20%"],
+        ["د. أحمد محمد علي", "01012345678", first_mat_title, "", "", "", "سلسلة التفوق", "نسخة خاصة بالمدرس", "", "cairo", "", "55%"],
         ["أ. سارة محمود", "01198765432", first_mat_title, "", "", "", "", "", "01200001111", "", "", ""],
     ]
 
@@ -924,7 +953,7 @@ def build_excel_template_bytes(materials: Optional[List[Dict[str, Any]]] = None)
         ("العلامة المائية", "اكتب نص العلامة المائية، أو اكتب كلمة (لوجو) أو (صورة) لإرفاق صورة لوجو خاص بالمدرس من البوت، أو اتركه فارغاً"),
         ("هاتف 2", "رقم إضافي يظهر بالتبادل في الصفحات الداخلية"),
         ("الخط وحجم الخط", "الخط مثل: cairo / tahoma / arial / naskh — وحجم الخط رقم مثل 14 أو 16"),
-        ("نسبة العلامة المائية", "اختياري: نسبة ظهور العلامة المائية (نص أو لوجو) مثل 15 أو 15% أو 0.15 — اتركها فارغة لاستخدام الديفولت"),
+        ("نسبة العلامة المائية", "اختياري (اتركها فارغة للطبيعي: اللوجو 15% والنص 20%-30%) — لرفعها عن الطبيعي اكتب: 50% أو 60% (واضح) أو 75%-85% (قوي) أو حتى 100% — كما يقبل كلمات: خفيف / عالي / قوي"),
     ]
     for r_idx, (k, v) in enumerate(info_lines, start=1):
         ws_info.cell(row=r_idx, column=1, value=k)
@@ -1058,7 +1087,7 @@ def build_materials_catalog_excel_bytes(
     ws_batch = wb.create_sheet("دفعات جاهزة بهذه الخامات")
     ws_batch.views.sheetView[0].rightToLeft = True
     ws_batch.freeze_panes = "A2"
-    batch_headers = ["اسم المدرس", "رقم الهاتف", "المذكرة", "اسم السلسلة", "العلامة المائية", "هاتف 2", "الخط", "حجم الخط"]
+    batch_headers = ["اسم المدرس", "رقم الهاتف", "المذكرة", "اسم السلسلة", "العلامة المائية", "نسبة العلامة المائية", "هاتف 2", "الخط", "حجم الخط"]
     for col_idx, h in enumerate(batch_headers, start=1):
         c = ws_batch.cell(row=1, column=col_idx, value=h)
         c.fill = header_fill
@@ -1068,17 +1097,17 @@ def build_materials_catalog_excel_bytes(
     ws_batch.row_dimensions[1].height = 28
 
     for row_idx, m in enumerate(usable_sorted, start=2):
-        row_vals = ["", "", str(m.get("title") or ""), "", "", "", "cairo", ""]
+        row_vals = ["", "", str(m.get("title") or ""), "", "", "", "", "cairo", ""]
         fill = row_even_fill if row_idx % 2 == 0 else row_odd_fill
         for col_idx, v in enumerate(row_vals, start=1):
             c = ws_batch.cell(row=row_idx, column=col_idx, value=v)
             c.fill = fill
             c.font = body_font
             c.border = border
-            if col_idx in (2, 6):
+            if col_idx in (2, 7):
                 c.number_format = "@"
             c.alignment = Alignment(horizontal="center", vertical="center")
-    for col_idx, w in enumerate([24, 18, 42, 24, 22, 16, 12, 12], start=1):
+    for col_idx, w in enumerate([24, 18, 42, 24, 22, 18, 16, 12, 12], start=1):
         ws_batch.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = w
 
     buf = io.BytesIO()
