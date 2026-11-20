@@ -297,8 +297,8 @@ def process_logo_image_to_transparent_png(
     return png_bytes
 
 
-def _prepare_logo_overlay_png_bytes(logo_path: str, opacity: float) -> Optional[bytes]:
-    """تحضير بايتات صورة اللوجو بالشفافية المطلوبة مرة واحدة لإعادة استخدامها عبر كل الصفحات بسرعة."""
+def _prepare_logo_overlay_png_bytes(logo_path: str, opacity: float, rotation: float = 0.0) -> Optional[bytes]:
+    """تحضير بايتات صورة اللوجو بالشفافية والزاوية المطلوبة مرة واحدة لإعادة استخدامها عبر كل الصفحات بسرعة."""
     if not logo_path or not os.path.exists(logo_path):
         return None
     try:
@@ -309,6 +309,10 @@ def _prepare_logo_overlay_png_bytes(logo_path: str, opacity: float) -> Optional[
             if max(w, h) > 1200:
                 sc = 1200.0 / float(max(w, h))
                 pil_img = pil_img.resize((max(1, int(w * sc)), max(1, int(h * sc))), Image.LANCZOS)
+            rot = float(rotation or 0.0)
+            if abs(rot) > 0.5:
+                # PIL.Image.rotate يدور عكس عقارب الساعة للقيم الموجبة، لذا نعكس الإشارة لمطابقة CSS (مع عقارب الساعة للموجب)
+                pil_img = pil_img.rotate(-rot, resample=Image.BICUBIC, expand=True)
             r, g, b, a = pil_img.split()
             op = max(0.02, min(1.0, float(opacity)))
             a = a.point(lambda x: int(x * op))
@@ -1138,10 +1142,11 @@ def _draw_logo_on_page(page, el: dict, page_num: int, logo_path: str, logo_bytes
     rect = fitz.Rect(cx - scale / 2, cy - scale / 2, cx + scale / 2, cy + scale / 2)
 
     op = float(el.get("opacity", 0.15))
-    cache_key = (logo_path, round(op, 3))
+    rot = float(el.get("rotation", 0.0) or 0.0)
+    cache_key = (logo_path, round(op, 3), round(rot, 1))
     cached_bytes = logo_bytes_cache.get(cache_key) if logo_bytes_cache is not None else None
     if cached_bytes is None:
-        cached_bytes = _prepare_logo_overlay_png_bytes(logo_path, op)
+        cached_bytes = _prepare_logo_overlay_png_bytes(logo_path, op, rotation=rot)
         if cached_bytes and logo_bytes_cache is not None:
             logo_bytes_cache[cache_key] = cached_bytes
 
@@ -1322,12 +1327,12 @@ def _draw_text_stamp_on_page(page, stamp: dict, text: str, pw: float, ph: float,
 
     # --- نمط Tiled (علامة مائية مكررة) ---
     if pattern == "tiled" and stamp_type == "watermark":
-        _draw_tiled_watermark(page, text, fsize, color, opacity, overlay_val, font_family=font_family)
+        _draw_tiled_watermark(page, text, fsize, color, opacity, overlay_val, font_family=font_family, rotation=rotation)
         return
 
     # --- نمط Diagonal (علامة مائية قطرية) ---
     if pattern == "diagonal" and stamp_type == "watermark":
-        _draw_diagonal_watermark(page, text, fsize, color, opacity, overlay_val, font_family=font_family)
+        _draw_diagonal_watermark(page, text, fsize, color, opacity, overlay_val, font_family=font_family, rotation=rotation)
         return
 
     # --- نمط Standard (ختم عادي) ---
@@ -1377,11 +1382,13 @@ def _draw_text_stamp_on_page(page, stamp: dict, text: str, pw: float, ph: float,
     if render_mode:
         write_kwargs["render_mode"] = render_mode
     if abs(rotation) > 0.5:
-        write_kwargs["morph"] = (fitz.Point(cx, cy), fitz.Matrix(1, 0, 0, 1, 0, 0).prerotate(rotation))
+        # في المتصفح (CSS rotate) القيم الموجبة تدور مع عقارب الساعة، بينما fitz.Matrix.prerotate يدور عكس عقارب الساعة.
+        # نعكس الإشارة هنا ليطابق اتجاه الدوران في الـ PDF ما يظهر في الاستوديو تماماً (بما في ذلك ±45، ±90، 180).
+        write_kwargs["morph"] = (fitz.Point(cx, cy), fitz.Matrix(1, 0, 0, 1, 0, 0).prerotate(-rotation))
     tw.write_text(page, **write_kwargs)
 
 
-def _draw_tiled_watermark(page, text: str, fsize: float, color: tuple, opacity: float, overlay: bool, font_family: str = "cairo"):
+def _draw_tiled_watermark(page, text: str, fsize: float, color: tuple, opacity: float, overlay: bool, font_family: str = "cairo", rotation: float = 0.0):
     """رسم علامة مائية مكررة (tiled) على الصفحة."""
     pw = page.rect.width
     ph = page.rect.height
@@ -1393,7 +1400,8 @@ def _draw_tiled_watermark(page, text: str, fsize: float, color: tuple, opacity: 
     gap_x = text_w + 80
     gap_y = tile_fsize * 3
 
-    angle = -30  # زاوية الدوران
+    css_angle = float(rotation) if abs(float(rotation or 0.0)) > 0.5 else -30.0
+    angle = -css_angle  # تحويل زاوية CSS إلى زاوية PyMuPDF
 
     tw = fitz.TextWriter(page.rect)
     y = -ph * 0.3
@@ -1411,7 +1419,7 @@ def _draw_tiled_watermark(page, text: str, fsize: float, color: tuple, opacity: 
     tw.write_text(page, color=color, opacity=opacity, overlay=overlay, morph=morph)
 
 
-def _draw_diagonal_watermark(page, text: str, fsize: float, color: tuple, opacity: float, overlay: bool, font_family: str = "cairo"):
+def _draw_diagonal_watermark(page, text: str, fsize: float, color: tuple, opacity: float, overlay: bool, font_family: str = "cairo", rotation: float = 0.0):
     """رسم علامة مائية قطرية واحدة في منتصف الصفحة."""
     pw = page.rect.width
     ph = page.rect.height
@@ -1432,7 +1440,8 @@ def _draw_diagonal_watermark(page, text: str, fsize: float, color: tuple, opacit
         page.insert_text(fitz.Point(start_x, start_y), text, fontfile=fallback_fontfile, fontsize=fsize, color=color, overlay=overlay)
         return
 
-    morph = (fitz.Point(cx, cy), fitz.Matrix(1,0,0,1,0,0).prerotate(-45))
+    css_angle = float(rotation) if abs(float(rotation or 0.0)) > 0.5 else -45.0
+    morph = (fitz.Point(cx, cy), fitz.Matrix(1,0,0,1,0,0).prerotate(-css_angle))
     tw.write_text(page, color=color, opacity=opacity, overlay=overlay, morph=morph)
 
 

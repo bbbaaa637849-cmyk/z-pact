@@ -169,6 +169,117 @@ class TestBatchParserAndStamper(unittest.TestCase):
         self.assertEqual(parsed[0].get("watermark_opacity"), 0.25)
         self.assertNotIn("watermark_opacity", parsed[1])
 
+    def test_03e_rotation_direction_matches_css_clockwise_in_pdf(self):
+        """التحقق من أن الزاوية الموجبة تدور مع عقارب الساعة والسالبة عكسها (مثل الاستوديو CSS) وأن 180 تعكس الاتجاه."""
+        import fitz
+        def _measure_delta(rot_deg: float):
+            doc = fitz.open()
+            page = doc.new_page(width=400, height=400)
+            stamper_mod._draw_text_stamp_on_page(
+                page,
+                {
+                    "type": "phone",
+                    "x_pct": 50,
+                    "y_pct": 50,
+                    "font_size": 16,
+                    "rotation": rot_deg,
+                    "opacity": 1.0,
+                    "color": "#000000",
+                    "pattern": "single",
+                    "font_family": "cairo",
+                },
+                "01012345678",
+                400,
+                400,
+                "cairo",
+            )
+            d = page.get_text("rawdict")
+            chars = [c for b in d["blocks"] for l in b.get("lines", []) for s in l.get("spans", []) for c in s.get("chars", [])]
+            self.assertGreaterEqual(len(chars), 2)
+            x0, y0 = chars[0]["origin"]
+            x1, y1 = chars[-1]["origin"]
+            doc.close()
+            return (x1 - x0, y1 - y0)
+
+        dx_p45, dy_p45 = _measure_delta(45)
+        self.assertGreater(dx_p45, 10)
+        self.assertGreater(dy_p45, 10, "زاوية +45 يجب أن تميل لأسفل اليمين (مع عقارب الساعة)")
+
+        dx_m45, dy_m45 = _measure_delta(-45)
+        self.assertGreater(dx_m45, 10)
+        self.assertLess(dy_m45, -10, "زاوية -45 يجب أن تميل لأعلى اليمين (عكس عقارب الساعة)")
+
+        dx_p90, dy_p90 = _measure_delta(90)
+        self.assertLess(abs(dx_p90), 5)
+        self.assertGreater(dy_p90, 10, "زاوية +90 يجب أن تتجه للأسفل (مع عقارب الساعة)")
+
+        dx_180, dy_180 = _measure_delta(180)
+        self.assertLess(dx_180, -10, "زاوية 180 يجب أن تعكس النص أفقياً للاتجاه المعاكس")
+        self.assertLess(abs(dy_180), 5)
+
+    def test_03f_batch_retry_failed_full_and_selective_parts(self):
+        """التحقق من حفظ آخر دفعة وإظهار أزرار إعادة طباعة الفاشل والكل واختيار أجزاء محددة."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        from bot_service.handlers import admin_studio as ast_mod
+
+        class _FakeMsg:
+            def __init__(self):
+                self.edits = []
+                self.chat = type("C", (), {"id": 990011})()
+            async def edit_text(self, text, reply_markup=None, parse_mode=None):
+                self.edits.append((text, reply_markup))
+
+        class _FakeBot:
+            def __init__(self):
+                self.sent_msgs = []
+                self.sent_docs = []
+                self.progress = _FakeMsg()
+            async def send_message(self, chat_id, text, reply_markup=None, parse_mode=None):
+                self.sent_msgs.append((text, reply_markup))
+                return self.progress
+            async def send_document(self, chat_id, document, caption=None, parse_mode=None):
+                self.sent_docs.append((document, caption))
+
+        fake_bot = _FakeBot()
+        runnable = [
+            {"idx": 1, "final_material_id": 10, "teacher_name": "أ/ أول", "phone": "01011111111", "matched_material_title": "فيزياء"},
+            {"idx": 2, "final_material_id": 10, "teacher_name": "أ/ ثاني", "phone": "01022222222", "matched_material_title": "فيزياء"},
+            {"idx": 3, "final_material_id": 10, "teacher_name": "أ/ ثالث", "phone": "01033333333", "matched_material_title": "فيزياء"},
+        ]
+
+        async def _run():
+            with patch.object(ast_mod.bridge_client, "direct_stamp_sync", new=AsyncMock(return_value={"ok": False, "error": "timeout"})), \
+                 patch.object(ast_mod, "_persist_recent_batches", lambda: None):
+                await ast_mod.execute_stamp_items_sequential(
+                    bot=fake_bot,
+                    chat_id=990011,
+                    user_id=8287744705,
+                    runnable=runnable,
+                    header_label="دفعة اختبار الفشل",
+                )
+
+        asyncio.run(_run())
+        self.assertTrue(fake_bot.progress.edits)
+        final_text, final_kb = fake_bot.progress.edits[-1]
+        self.assertIn("فشلت معالجة", final_text)
+        self.assertIsNotNone(final_kb)
+        cb_datas = [btn.callback_data for row in final_kb.inline_keyboard for btn in row]
+        self.assertTrue(any(d.startswith("adm_bretry:failed:") for d in cb_datas))
+        self.assertTrue(any(d.startswith("adm_bretry:all:") for d in cb_datas))
+        self.assertTrue(any(d.startswith("adm_bretry:pick:") for d in cb_datas))
+
+        rec = ast_mod._get_last_batch_run_for_chat(990011)
+        self.assertIsNotNone(rec)
+        self.assertEqual(len(rec["records"]), 3)
+        self.assertTrue(all(not r["ok"] for r in rec["records"]))
+
+        # اختبار قائمة اختيار أجزاء محددة (تحديد العنصر #2 فقط)
+        txt_pick, kb_pick = ast_mod._render_batch_retry_picker(rec, {2}, page=0)
+        self.assertIn("محدد الآن: <code>1</code>", txt_pick)
+        pick_cbs = [btn.callback_data for row in kb_pick.inline_keyboard for btn in row]
+        self.assertTrue(any(d.startswith("adm_bretry:runsel:") for d in pick_cbs))
+
     def test_03c_logo_requested_once_per_repeated_teacher(self):
         from bot_service.handlers import admin_studio as ast_mod
         e1 = {"idx": 1, "teacher_name": "أحمد", "phone": "01011112222", "watermark_type": "logo"}

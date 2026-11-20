@@ -6,6 +6,7 @@
 import asyncio
 import gc
 import html
+import json
 import logging
 import os
 import secrets
@@ -57,8 +58,108 @@ _BATCH_LOCK = asyncio.Lock()
 # ذاكرة مؤقتة لاختيار مدرسين محددين عند إعادة الختم لكل مشرف ومذكرة
 _ROSTER_SELECTIONS: Dict[tuple[int, int], set[int]] = {}
 
+# سجل الدفعات الأخيرة لدعم إعادة الطباعة بالكامل أو الفاشل فقط أو أجزاء محددة
+_RECENT_BATCH_RUNS: Dict[str, Dict[str, Any]] = {}
+_LAST_BATCH_RUN_BY_CHAT: Dict[str, str] = {}
+_BATCH_RETRY_SELECTIONS: Dict[tuple[int, str], set[int]] = {}
+_RECENT_BATCHES_FILE = os.path.join(bot_config.STORAGE_DIR, "bot_recent_batches.json")
+_RECENT_BATCHES_LOADED = False
+
 TMP_UPLOAD_DIR = os.path.join(bot_config.STORAGE_DIR, "bot_tmp")
 os.makedirs(TMP_UPLOAD_DIR, exist_ok=True)
+
+
+def _load_recent_batches_once() -> None:
+    global _RECENT_BATCHES_LOADED
+    if _RECENT_BATCHES_LOADED:
+        return
+    _RECENT_BATCHES_LOADED = True
+    try:
+        if os.path.isfile(_RECENT_BATCHES_FILE):
+            with open(_RECENT_BATCHES_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                runs = data.get("runs")
+                by_chat = data.get("by_chat")
+                if isinstance(runs, dict):
+                    _RECENT_BATCH_RUNS.update(runs)
+                if isinstance(by_chat, dict):
+                    _LAST_BATCH_RUN_BY_CHAT.update({str(k): str(v) for k, v in by_chat.items()})
+    except Exception:
+        pass
+
+
+def _persist_recent_batches() -> None:
+    try:
+        os.makedirs(os.path.dirname(_RECENT_BATCHES_FILE), exist_ok=True)
+        tmp_path = f"{_RECENT_BATCHES_FILE}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {"runs": _RECENT_BATCH_RUNS, "by_chat": _LAST_BATCH_RUN_BY_CHAT},
+                f,
+                ensure_ascii=False,
+            )
+        os.replace(tmp_path, _RECENT_BATCHES_FILE)
+    except Exception:
+        pass
+
+
+def _save_batch_run_record(
+    chat_id: int,
+    user_id: int,
+    header_label: str,
+    batch_font: Optional[str],
+    batch_frame: Optional[str],
+    records: List[Dict[str, Any]],
+) -> str:
+    _load_recent_batches_once()
+    run_id = secrets.token_hex(4)
+    _RECENT_BATCH_RUNS[run_id] = {
+        "run_id": run_id,
+        "chat_id": int(chat_id),
+        "user_id": int(user_id),
+        "header_label": str(header_label or "الدفعة الأخيرة"),
+        "batch_font": batch_font,
+        "batch_frame": batch_frame,
+        "records": records,
+    }
+    _LAST_BATCH_RUN_BY_CHAT[str(chat_id)] = run_id
+    # الاحتفاظ بآخر 30 دفعة فقط لتفادي تضخم الملف
+    while len(_RECENT_BATCH_RUNS) > 30:
+        oldest_key = next(iter(_RECENT_BATCH_RUNS))
+        _RECENT_BATCH_RUNS.pop(oldest_key, None)
+    _persist_recent_batches()
+    return run_id
+
+
+def _get_batch_run_record(run_id: str) -> Optional[Dict[str, Any]]:
+    _load_recent_batches_once()
+    return _RECENT_BATCH_RUNS.get(str(run_id))
+
+
+def _get_last_batch_run_for_chat(chat_id: int) -> Optional[Dict[str, Any]]:
+    _load_recent_batches_once()
+    rid = _LAST_BATCH_RUN_BY_CHAT.get(str(chat_id))
+    return _RECENT_BATCH_RUNS.get(rid) if rid else None
+
+
+def _build_batch_result_keyboard(run_id: str, total: int, failed_count: int) -> InlineKeyboardMarkup:
+    rows: List[List[InlineKeyboardButton]] = []
+    if failed_count > 0:
+        rows.append([InlineKeyboardButton(
+            text=f"🔄 إعادة طباعة الفاشل فقط ({failed_count})",
+            callback_data=f"adm_bretry:failed:{run_id}",
+        )])
+    if total > 0:
+        rows.append([InlineKeyboardButton(
+            text=f"🔁 إعادة طباعة الدفعة الأخيرة بالكامل ({total})",
+            callback_data=f"adm_bretry:all:{run_id}",
+        )])
+        rows.append([InlineKeyboardButton(
+            text="☑️ اختيار أجزاء / مدرسين محددين",
+            callback_data=f"adm_bretry:pick:{run_id}:0",
+        )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _is_admin(user_id: int) -> bool:
@@ -178,11 +279,14 @@ async def handle_batch_help(event: Message | CallbackQuery):
         return
 
     target_msg = event.message if isinstance(event, CallbackQuery) else event
-    kb = InlineKeyboardMarkup(inline_keyboard=[
+    kb_rows = [
         [InlineKeyboardButton(text="✍️ إرسال قائمة مدرسين كنص الآن", callback_data="adm_batch:paste_text")],
         [InlineKeyboardButton(text="📥 تنزيل قوالب Excel و Word", callback_data="adm_view:download_templates")],
-        [InlineKeyboardButton(text="🔙 رجوع للوحة الأدمن", callback_data="adm_view:stats")],
-    ])
+    ]
+    if target_msg and _get_last_batch_run_for_chat(target_msg.chat.id):
+        kb_rows.append([InlineKeyboardButton(text="🔁 إعادة طباعة آخر دفعة / أجزاء منها", callback_data="adm_bretry:last")])
+    kb_rows.append([InlineKeyboardButton(text="🔙 رجوع للوحة الأدمن", callback_data="adm_view:stats")])
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
     await target_msg.answer(
         "📊 <b>نظام ختم الدفعات المتسلسل (Excel / Word / نص سريع)</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
@@ -1004,6 +1108,7 @@ async def execute_stamp_items_sequential(
         total = len(runnable)
         ok_count = 0
         fail_lines = list(initial_skipped or [])
+        item_records: List[Dict[str, Any]] = []
         progress_msg = await bot.send_message(
             chat_id=chat_id,
             text=f"⏳ <b>بدء معالجة {html.escape(header_label)} بهدوء (0 / {total})</b> — ملف واحد كل مرة لحماية المعالج...",
@@ -1017,6 +1122,8 @@ async def execute_stamp_items_sequential(
             disp_name = tname or tseries or tphone or "بدون اسم"
             disp_phone = tphone or "بدون رقم"
             entry_id = item.get("teacher_entry_id")
+            item_copy = dict(item)
+            item_copy["idx"] = item.get("idx", pos)
 
             try:
                 await progress_msg.edit_text(
@@ -1062,6 +1169,7 @@ async def execute_stamp_items_sequential(
             if not res.get("ok"):
                 err_txt = str(res.get("error") or "خطأ غير معروف")
                 fail_lines.append(f"#{item.get('idx', pos)} {disp_name}: {err_txt}")
+                item_records.append({"pos": pos, "item": item_copy, "ok": False, "error": err_txt})
                 if entry_id:
                     await bridge_client.mark_teacher_entry(int(entry_id), "failed", error_message=err_txt)
                 await asyncio.sleep(0.3)
@@ -1071,13 +1179,16 @@ async def execute_stamp_items_sequential(
             order_code = info.get("order_code")
             pdf_bytes = await bridge_client.download_order_pdf(order_code)
             if not pdf_bytes:
-                fail_lines.append(f"#{item.get('idx', pos)} {disp_name}: تعذر تنزيل الـ PDF")
+                err_txt = "تعذر تنزيل الـ PDF"
+                fail_lines.append(f"#{item.get('idx', pos)} {disp_name}: {err_txt}")
+                item_records.append({"pos": pos, "item": item_copy, "ok": False, "error": err_txt})
                 if entry_id:
                     await bridge_client.mark_teacher_entry(int(entry_id), "failed", error_message="تعذر تنزيل الملف")
                 await asyncio.sleep(0.3)
                 continue
 
             mat_title = info.get("material_title", "booklet")
+            item_copy.setdefault("matched_material_title", mat_title)
             safe_name = f"{_safe_filename_part(tname or tseries or tphone or 'stamp')}_{_safe_filename_part(mat_title)}_{order_code}.pdf"
             try:
                 await bot.send_document(
@@ -1091,17 +1202,40 @@ async def execute_stamp_items_sequential(
                     parse_mode="HTML",
                 )
                 ok_count += 1
+                item_records.append({"pos": pos, "item": item_copy, "ok": True, "error": None})
                 await bridge_client.cleanup_order_pdf(order_code)
             except Exception as send_err:
-                fail_lines.append(f"#{item.get('idx', pos)} {disp_name}: خطأ إرسال ({send_err})")
+                err_txt = f"خطأ إرسال ({send_err})"
+                fail_lines.append(f"#{item.get('idx', pos)} {disp_name}: {err_txt}")
+                item_records.append({"pos": pos, "item": item_copy, "ok": False, "error": err_txt})
             finally:
                 del pdf_bytes
                 gc.collect()
 
             await asyncio.sleep(0.5)
 
+        retry_kb = None
+        failed_items_count = sum(1 for r in item_records if not r.get("ok"))
+        if item_records:
+            run_id = _save_batch_run_record(
+                chat_id=chat_id,
+                user_id=user_id,
+                header_label=header_label,
+                batch_font=batch_font,
+                batch_frame=batch_frame,
+                records=item_records,
+            )
+            retry_kb = _build_batch_result_keyboard(run_id, len(item_records), failed_items_count)
+
+        if ok_count == 0 and total > 0:
+            title_line = f"❌ <b>فشلت معالجة {html.escape(header_label)}!</b>"
+        elif fail_lines:
+            title_line = f"⚠️ <b>اكتملت معالجة {html.escape(header_label)} مع وجود أخطاء</b>"
+        else:
+            title_line = f"🎉 <b>اكتملت معالجة {html.escape(header_label)} بنجاح!</b>"
+
         summary = [
-            f"🎉 <b>اكتملت معالجة {html.escape(header_label)} بنجاح!</b>",
+            title_line,
             "━━━━━━━━━━━━━━━━━━",
             f"✅ ملفات مرسلة بنجاح: <code>{ok_count}</code> من <code>{total}</code>",
             f"⚠️ متخطى / أخطاء: <code>{len(fail_lines)}</code>",
@@ -1110,10 +1244,256 @@ async def execute_stamp_items_sequential(
             summary.append("\n<b>تفاصيل الملاحظات:</b>")
             for fl in fail_lines[:10]:
                 summary.append(f"• {html.escape(str(fl))}")
+        if retry_kb:
+            summary.append("\n💡 يمكنك من الأزرار بالأسفل إعادة طباعة الفاشل فقط، أو إعادة طباعة الدفعة الأخيرة بالكامل، أو اختيار أجزاء/مدرسين محددين.")
         try:
-            await progress_msg.edit_text("\n".join(summary), parse_mode="HTML")
+            await progress_msg.edit_text("\n".join(summary), reply_markup=retry_kb, parse_mode="HTML")
         except Exception:
-            await bot.send_message(chat_id=chat_id, text="\n".join(summary), parse_mode="HTML")
+            await bot.send_message(chat_id=chat_id, text="\n".join(summary), reply_markup=retry_kb, parse_mode="HTML")
+
+
+def _render_batch_retry_picker(
+    run_record: Dict[str, Any],
+    selected: set[int],
+    page: int = 0,
+) -> tuple[str, InlineKeyboardMarkup]:
+    """عرض قائمة تفاعلية مرقمة لاختيار أجزاء/مدرسين محددين لإعادة طباعتهم من الدفعة الأخيرة."""
+    run_id = str(run_record["run_id"])
+    records = run_record.get("records") or []
+    header = str(run_record.get("header_label") or "الدفعة الأخيرة")
+    per_page = 10
+    total = len(records)
+    max_page = max(0, (total - 1) // per_page) if total else 0
+    page = max(0, min(page, max_page))
+    slice_recs = records[page * per_page : (page + 1) * per_page]
+
+    failed_cnt = sum(1 for r in records if not r.get("ok"))
+    ok_cnt = total - failed_cnt
+
+    lines = [
+        f"☑️ <b>اختيار أجزاء / مدرسين لإعادة الطباعة</b>",
+        f"📦 <b>{html.escape(header)}</b>",
+        f"✅ ناجح: <code>{ok_cnt}</code> | ❌ فاشل: <code>{failed_cnt}</code> | محدد الآن: <code>{len(selected)}</code>",
+        "━━━━━━━━━━━━━━━━━━",
+        "اضغط على أي عنصر لتحديده أو إلغاء تحديده ثم اضغط <b>إعادة طباعة المحدد</b>:",
+    ]
+
+    kb_rows: List[List[InlineKeyboardButton]] = []
+    for r in slice_recs:
+        pos = int(r.get("pos", 0))
+        it = r.get("item") or {}
+        chk = "☑️" if pos in selected else "⬜"
+        st_ico = "✅" if r.get("ok") else "❌"
+        lbl = _batch_entry_label(it)[:22]
+        mat_lbl = str(it.get("matched_material_title") or it.get("material_ref") or f"#{it.get('final_material_id', '')}")[:18]
+        kb_rows.append([InlineKeyboardButton(
+            text=f"{chk} {st_ico} #{pos} {lbl} | {mat_lbl}",
+            callback_data=f"adm_bretry:tog:{run_id}:{pos}:{page}",
+        )])
+
+    helper_row: List[InlineKeyboardButton] = []
+    if failed_cnt > 0:
+        helper_row.append(InlineKeyboardButton(text=f"❌ الفاشل ({failed_cnt})", callback_data=f"adm_bretry:selfail:{run_id}:{page}"))
+    helper_row.append(InlineKeyboardButton(text="✅ الكل", callback_data=f"adm_bretry:selall:{run_id}:{page}"))
+    helper_row.append(InlineKeyboardButton(text="⬜ لا شيء", callback_data=f"adm_bretry:selnone:{run_id}:{page}"))
+    kb_rows.append(helper_row)
+
+    if max_page > 0:
+        nav_row: List[InlineKeyboardButton] = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton(text="⬅️ السابق", callback_data=f"adm_bretry:pick:{run_id}:{page - 1}"))
+        nav_row.append(InlineKeyboardButton(text=f"{page + 1}/{max_page + 1}", callback_data=f"adm_bretry:pick:{run_id}:{page}"))
+        if page < max_page:
+            nav_row.append(InlineKeyboardButton(text="التالي ➡️", callback_data=f"adm_bretry:pick:{run_id}:{page + 1}"))
+        kb_rows.append(nav_row)
+
+    if selected:
+        kb_rows.append([InlineKeyboardButton(
+            text=f"🚀 إعادة طباعة المحدد الآن ({len(selected)})",
+            callback_data=f"adm_bretry:runsel:{run_id}",
+        )])
+    kb_rows.append([InlineKeyboardButton(
+        text=f"🔁 إعادة طباعة الدفعة بالكامل ({total})",
+        callback_data=f"adm_bretry:all:{run_id}",
+    )])
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+
+@router.callback_query(F.data == "adm_bretry:last")
+async def handle_batch_retry_open_last(callback: CallbackQuery):
+    if not await check_admin_perm(callback, bot_config, "batch_vip"):
+        return
+    rec = _get_last_batch_run_for_chat(callback.message.chat.id)
+    if not rec:
+        await callback.answer("لا توجد دفعة سابقة محفوظة في هذه المحادثة بعد.", show_alert=True)
+        return
+    run_id = rec["run_id"]
+    records = rec.get("records") or []
+    failed_positions = {int(r["pos"]) for r in records if not r.get("ok")}
+    key = (callback.from_user.id, run_id)
+    selected = _BATCH_RETRY_SELECTIONS.setdefault(key, set(failed_positions))
+    txt, kb = _render_batch_retry_picker(rec, selected, page=0)
+    await callback.message.answer(txt, reply_markup=kb, parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_bretry:failed:"))
+async def handle_batch_retry_failed_only(callback: CallbackQuery):
+    if not await check_admin_perm(callback, bot_config, "batch_vip"):
+        return
+    run_id = callback.data.split(":")[2]
+    rec = _get_batch_run_record(run_id)
+    if not rec:
+        await callback.answer("⚠️ انتهت صلاحية بيانات هذه الدفعة، أعد إرسال الملف.", show_alert=True)
+        return
+    failed_items = [dict(r["item"]) for r in (rec.get("records") or []) if not r.get("ok")]
+    if not failed_items:
+        await callback.answer("✅ لا توجد عناصر فاشلة في هذه الدفعة!", show_alert=True)
+        return
+    await callback.answer(f"🔄 جاري إعادة طباعة الفاشل فقط ({len(failed_items)})...")
+    asyncio.create_task(
+        execute_stamp_items_sequential(
+            bot=callback.bot,
+            chat_id=callback.message.chat.id,
+            user_id=callback.from_user.id,
+            runnable=failed_items,
+            batch_font=rec.get("batch_font"),
+            batch_frame=rec.get("batch_frame"),
+            header_label=f"إعادة طباعة الفاشل — {rec.get('header_label', 'الدفعة')}",
+        )
+    )
+
+
+@router.callback_query(F.data.startswith("adm_bretry:all:"))
+async def handle_batch_retry_all(callback: CallbackQuery):
+    if not await check_admin_perm(callback, bot_config, "batch_vip"):
+        return
+    run_id = callback.data.split(":")[2]
+    rec = _get_batch_run_record(run_id)
+    if not rec:
+        await callback.answer("⚠️ انتهت صلاحية بيانات هذه الدفعة، أعد إرسال الملف.", show_alert=True)
+        return
+    all_items = [dict(r["item"]) for r in (rec.get("records") or [])]
+    if not all_items:
+        await callback.answer("⚠️ لا توجد عناصر في هذه الدفعة.", show_alert=True)
+        return
+    await callback.answer(f"🔁 جاري إعادة طباعة الدفعة بالكامل ({len(all_items)})...")
+    asyncio.create_task(
+        execute_stamp_items_sequential(
+            bot=callback.bot,
+            chat_id=callback.message.chat.id,
+            user_id=callback.from_user.id,
+            runnable=all_items,
+            batch_font=rec.get("batch_font"),
+            batch_frame=rec.get("batch_frame"),
+            header_label=f"إعادة طباعة — {rec.get('header_label', 'الدفعة')}",
+        )
+    )
+
+
+@router.callback_query(F.data.startswith("adm_bretry:pick:"))
+async def handle_batch_retry_pick_page(callback: CallbackQuery):
+    if not await check_admin_perm(callback, bot_config, "batch_vip"):
+        return
+    parts = callback.data.split(":")
+    run_id = parts[2]
+    page = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+    rec = _get_batch_run_record(run_id)
+    if not rec:
+        await callback.answer("⚠️ انتهت صلاحية بيانات هذه الدفعة.", show_alert=True)
+        return
+    key = (callback.from_user.id, run_id)
+    if key not in _BATCH_RETRY_SELECTIONS:
+        _BATCH_RETRY_SELECTIONS[key] = {int(r["pos"]) for r in (rec.get("records") or []) if not r.get("ok")}
+    txt, kb = _render_batch_retry_picker(rec, _BATCH_RETRY_SELECTIONS[key], page=page)
+    try:
+        await callback.message.edit_text(txt, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        await callback.message.answer(txt, reply_markup=kb, parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_bretry:tog:"))
+async def handle_batch_retry_toggle(callback: CallbackQuery):
+    if not await check_admin_perm(callback, bot_config, "batch_vip"):
+        return
+    parts = callback.data.split(":")
+    run_id, pos, page = parts[2], int(parts[3]), int(parts[4])
+    rec = _get_batch_run_record(run_id)
+    if not rec:
+        await callback.answer("⚠️ انتهت صلاحية بيانات هذه الدفعة.", show_alert=True)
+        return
+    key = (callback.from_user.id, run_id)
+    selected = _BATCH_RETRY_SELECTIONS.setdefault(key, set())
+    if pos in selected:
+        selected.remove(pos)
+    else:
+        selected.add(pos)
+    txt, kb = _render_batch_retry_picker(rec, selected, page=page)
+    try:
+        await callback.message.edit_text(txt, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        await callback.message.answer(txt, reply_markup=kb, parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith(("adm_bretry:selfail:", "adm_bretry:selall:", "adm_bretry:selnone:")))
+async def handle_batch_retry_bulk_select(callback: CallbackQuery):
+    if not await check_admin_perm(callback, bot_config, "batch_vip"):
+        return
+    parts = callback.data.split(":")
+    action, run_id = parts[1], parts[2]
+    page = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+    rec = _get_batch_run_record(run_id)
+    if not rec:
+        await callback.answer("⚠️ انتهت صلاحية بيانات هذه الدفعة.", show_alert=True)
+        return
+    records = rec.get("records") or []
+    key = (callback.from_user.id, run_id)
+    if action == "selfail":
+        _BATCH_RETRY_SELECTIONS[key] = {int(r["pos"]) for r in records if not r.get("ok")}
+    elif action == "selall":
+        _BATCH_RETRY_SELECTIONS[key] = {int(r["pos"]) for r in records}
+    else:
+        _BATCH_RETRY_SELECTIONS[key] = set()
+    txt, kb = _render_batch_retry_picker(rec, _BATCH_RETRY_SELECTIONS[key], page=page)
+    try:
+        await callback.message.edit_text(txt, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        await callback.message.answer(txt, reply_markup=kb, parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_bretry:runsel:"))
+async def handle_batch_retry_run_selected(callback: CallbackQuery):
+    if not await check_admin_perm(callback, bot_config, "batch_vip"):
+        return
+    run_id = callback.data.split(":")[2]
+    rec = _get_batch_run_record(run_id)
+    if not rec:
+        await callback.answer("⚠️ انتهت صلاحية بيانات هذه الدفعة.", show_alert=True)
+        return
+    key = (callback.from_user.id, run_id)
+    selected = _BATCH_RETRY_SELECTIONS.get(key) or set()
+    if not selected:
+        await callback.answer("⚠️ اختر عنصراً واحداً على الأقل أولاً.", show_alert=True)
+        return
+    chosen_items = [dict(r["item"]) for r in (rec.get("records") or []) if int(r["pos"]) in selected]
+    if not chosen_items:
+        await callback.answer("⚠️ لم يُعثر على عناصر مطابقة للاختيار.", show_alert=True)
+        return
+    await callback.answer(f"🚀 جاري إعادة طباعة الأجزاء المحددة ({len(chosen_items)})...")
+    asyncio.create_task(
+        execute_stamp_items_sequential(
+            bot=callback.bot,
+            chat_id=callback.message.chat.id,
+            user_id=callback.from_user.id,
+            runnable=chosen_items,
+            batch_font=rec.get("batch_font"),
+            batch_frame=rec.get("batch_frame"),
+            header_label=f"إعادة طباعة أجزاء محددة ({len(chosen_items)})",
+        )
+    )
 
 
 async def run_material_waitlist_release(bot: Bot, material_id: int, fallback_chat_id: Optional[int] = None) -> int:
