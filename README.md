@@ -1,3 +1,13 @@
+---
+title: Z-PACT Enterprise
+emoji: 📚
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # منصة Z-PACT Enterprise (النسخة الشاملة)
 
 مستودع خاص (`Private`) يضم المنظومة الكاملة جاهزة للعمل على جهاز آخر:

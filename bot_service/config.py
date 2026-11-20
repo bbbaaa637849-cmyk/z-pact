@@ -18,11 +18,18 @@ load_dotenv(os.path.join(BASE_DIR, "Z-PACT-main", ".env"))
 
 
 def _derive_railway_miniapp_url() -> str:
-    """اشتقاق رابط الميني آب تلقائياً من متغيرات Railway المدمجة دون الحاجة لأي إعداد يدوي."""
+    """اشتقاق رابط الميني آب تلقائياً من متغيرات Railway أو Hugging Face Spaces دون الحاجة لأي إعداد يدوي."""
+    hf_host = (os.getenv("SPACE_HOST") or "").strip()
+    if not hf_host and os.getenv("SPACE_ID"):
+        sid = (os.getenv("SPACE_ID") or "").strip().replace("/", "-").replace("_", "-").lower()
+        if sid:
+            hf_host = f"{sid}.hf.space"
+
     raw_domain = (
         os.getenv("RAILWAY_PUBLIC_DOMAIN")
         or os.getenv("RAILWAY_STATIC_URL")
         or os.getenv("RAILWAY_SERVICE_PUBLIC_DOMAIN")
+        or hf_host
         or ""
     ).strip()
     if not raw_domain:
@@ -61,7 +68,8 @@ if _VOLUME_RUNTIME_ENV and os.path.isfile(_VOLUME_RUNTIME_ENV):
     load_dotenv(_VOLUME_RUNTIME_ENV, override=True)
 
 
-_RUNTIME_PORT = (os.getenv("PORT") or "8000").strip()
+_DEFAULT_PORT_STR = "7860" if (os.getenv("SPACE_ID") or os.getenv("SPACE_HOST")) else "8000"
+_RUNTIME_PORT = (os.getenv("PORT") or _DEFAULT_PORT_STR).strip()
 _DEFAULT_CORE_BASE = (os.getenv("CORE_BASE_URL") or f"http://127.0.0.1:{_RUNTIME_PORT}").strip().rstrip("/")
 _DEFAULT_CORE_API = (os.getenv("CORE_API_URL") or f"{_DEFAULT_CORE_BASE}/api").strip().rstrip("/")
 _RAILWAY_MINIAPP_URL = _derive_railway_miniapp_url()

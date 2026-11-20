@@ -402,15 +402,23 @@ async def main():
     cleanup_zpact_orphans()
     free_zombie_bot_processes()
 
+    is_hf_space = (
+        "--hf" in sys.argv
+        or bool(os.environ.get("SPACE_ID"))
+        or bool(os.environ.get("SPACE_HOST"))
+    )
     is_railway_cloud = (
         "--railway" in sys.argv
+        or "--cloud" in sys.argv
+        or is_hf_space
         or bool(os.environ.get("RAILWAY_ENVIRONMENT"))
         or bool(os.environ.get("RAILWAY_PROJECT_ID"))
         or bool(os.environ.get("RAILWAY_PUBLIC_DOMAIN"))
     )
 
     if is_railway_cloud:
-        core_port = int(os.environ.get("PORT", "8000"))
+        default_cloud_port = "7860" if is_hf_space else "8000"
+        core_port = int(os.environ.get("PORT", default_cloud_port))
         webhook_port = core_port
     else:
         core_port = select_clean_port(8000, [8088, 8090, 8800, 8888])
@@ -437,10 +445,17 @@ async def main():
         "MKL_NUM_THREADS": "1",
     }
 
+    hf_host = (os.environ.get("SPACE_HOST") or "").strip()
+    if not hf_host and os.environ.get("SPACE_ID"):
+        sid = os.environ.get("SPACE_ID", "").strip().replace("/", "-").replace("_", "-").lower()
+        if sid:
+            hf_host = f"{sid}.hf.space"
+
     railway_domain = (
         os.environ.get("RAILWAY_PUBLIC_DOMAIN")
         or os.environ.get("RAILWAY_STATIC_URL")
         or os.environ.get("RAILWAY_SERVICE_PUBLIC_DOMAIN")
+        or hf_host
         or ""
     ).strip()
     railway_miniapp_url: Optional[str] = None
